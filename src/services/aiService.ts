@@ -37,7 +37,11 @@ export async function analyzeProctoring(imageBuffer: string) {
     const text = response.text;
     if (!text) return { malpracticeDetected: false, reason: "No response from AI" };
     return JSON.parse(text);
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.message?.includes("429") || error?.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("AI Proctoring: Rate limit exceeded (429). Skipping analysis.");
+      return { malpracticeDetected: false, reason: "AI Service Busy (Rate Limit)" };
+    }
     console.error("AI Proctoring Error:", error);
     return { malpracticeDetected: false, reason: "Error in analysis" };
   }
@@ -66,7 +70,11 @@ export async function scoreExplanation(userExplanation: string, masterRationale:
       score: typeof result.score === 'number' ? Math.min(100, Math.max(0, result.score)) : 0,
       feedback: result.feedback || ""
     };
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.message?.includes("429") || error?.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("AI Scoring: Rate limit exceeded (429). Defaulting to 0.");
+      return { score: 0, feedback: "AI Service Busy (Rate Limit). Scoring deferred." };
+    }
     console.error("AI Scoring Error:", error);
     return { score: 0, feedback: "Error in scoring" };
   }

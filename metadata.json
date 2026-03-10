@@ -1,6 +1,6 @@
 {
-  "name": "Pro UW",
-  "description": "A minimalist, secure testing tool for Mortgage Underwriters with AI proctoring and automated scoring.",
+  "name": "Pro Underwriter",
+  "description": "UW Test tool",
   "requestFramePermissions": [
     "camera",
     "microphone"

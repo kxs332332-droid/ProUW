@@ -22,6 +22,8 @@ export interface Question {
 export interface TestSession {
   id: number;
   user_id: number;
+  module: number;
+  total_questions: number;
   start_time: string;
   end_time: string | null;
   status: 'in_progress' | 'completed' | 'published' | 'suspended' | 'denied';

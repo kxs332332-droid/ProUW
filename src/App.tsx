@@ -83,7 +83,7 @@ export default function App() {
       body: JSON.stringify({ reason })
     });
 
-    if (data.success) {
+    if (data && data.success) {
       setViolationCount(data.count);
       if (data.suspended) {
         setView('suspended');
@@ -91,7 +91,7 @@ export default function App() {
         if (document.fullscreenElement) document.exitFullscreen();
         logActivity('TEST_SUSPENDED', `Test suspended due to 5 violations. Reason: ${reason}`);
       } else {
-        alert(`Violation ${data.count}/5: ${reason}. Please follow all exam rules.`);
+        alert(`Violation ${data.count}/5: ${reason}. Please follow all exam rules. The test will be suspended after 5 violations.`);
         logActivity('VIOLATION', reason);
       }
     }
@@ -100,7 +100,8 @@ export default function App() {
   const handleProctoringWarning = useCallback((reason: string) => {
     setProctoringWarnings(prev => {
       const newCount = prev + 1;
-      alert(`Proctoring Warning: ${reason}. This detail has been documented.`);
+      // AI warnings are just documented, not counted as violations toward suspension
+      console.warn(`AI Proctoring Warning: ${reason}`);
       logActivity('PROCTORING_WARNING', reason);
       return newCount;
     });
@@ -174,14 +175,14 @@ export default function App() {
       const isFull = !!document.fullscreenElement;
       setIsFullscreen(isFull);
       if (!isFull && view === 'test' && activeSession) {
-        handleProctoringWarning("Exited full screen mode.");
+        handleViolation("Exited full screen mode.");
       }
     };
 
     const handleBlur = () => {
       if (view === 'test' && activeSession) {
         setIsBlurred(true);
-        handleProctoringWarning("Switched tabs or lost window focus.");
+        handleViolation("Switched tabs or lost window focus.");
       }
     };
 
@@ -258,18 +259,22 @@ export default function App() {
       setCurrentUser(data.user);
       setIsAdmin(data.user.role === 'admin');
       
-      // Check for active/suspended session
-      const session = await safeFetch(`/api/sessions/active/${data.user.id}`);
-      if (session) {
-        setActiveSession(session.id);
-        setViolationCount(session.violation_count);
-        if (session.status === 'suspended') {
-          setView('suspended');
+      if (data.user.role === 'admin') {
+        setView('admin');
+      } else {
+        // Check for active/suspended session
+        const session = await safeFetch(`/api/sessions/active/${data.user.id}`);
+        if (session && !session.error) {
+          setActiveSession(session.id);
+          setViolationCount(session.violation_count);
+          if (session.status === 'suspended') {
+            setView('suspended');
+          } else {
+            setView('home');
+          }
         } else {
           setView('home');
         }
-      } else {
-        setView('home');
       }
       
       logActivity('LOGIN', 'User logged in');
@@ -349,21 +354,22 @@ export default function App() {
           return;
         }
         if (existing.status === 'in_progress') {
-          if (confirm("You have an active session in progress. Would you like to resume it?")) {
+          const choice = confirm("You have an active session in progress.\n\nClick 'OK' to RESUME your existing session.\nClick 'Cancel' to START A NEW session (this will discard your current progress).");
+          
+          if (choice) {
             setActiveSession(existing.id);
             setViolationCount(existing.violation_count);
-            // We might need to fetch responses to know where they left off
             const resps = await safeFetch(`/api/admin/results/${existing.id}`);
             if (Array.isArray(resps)) {
               setCurrentQuestionIndex(resps.length);
-              // Re-calculate time left if needed, but for now let's just reset or use a default
               setTimeLeft(120 * 60); 
             }
             setView('test');
             return;
           } else {
-            // If they don't want to resume, they can't start a new one while one is in progress
-            return;
+            // Cancel existing session and proceed to start a new one
+            await safeFetch(`/api/sessions/${existing.id}`, { method: 'DELETE' });
+            logActivity('TEST_CANCELLED', `Cancelled existing session ${existing.id} to start new one`);
           }
         }
       }
@@ -382,7 +388,7 @@ export default function App() {
       const sessionData = await safeFetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: currentUser?.id })
+        body: JSON.stringify({ userId: currentUser?.id, module: currentModule })
       });
 
       if (sessionData.success) {
@@ -412,19 +418,29 @@ export default function App() {
     const userAns = answers[currentQ.id] || { answer: '', explanation: '' };
 
     try {
-      // AI Scoring
-      const aiResult = await scoreExplanation(userAns.explanation, currentQ.master_rationale);
+      // AI Scoring - Fallback to 0 if AI service fails to ensure test continuity
+      let aiScore = 0;
+      try {
+        const aiResult = await scoreExplanation(userAns.explanation, currentQ.master_rationale);
+        aiScore = aiResult.score || 0;
+      } catch (e) {
+        console.error("AI Scoring failed, defaulting to 0:", e);
+      }
 
-      await safeFetch(`/api/sessions/${activeSession}/responses`, {
+      const responseData = await safeFetch(`/api/sessions/${activeSession}/responses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           questionId: currentQ.id,
           answer: userAns.answer,
           explanation: userAns.explanation,
-          aiScore: aiResult.score || 0
+          aiScore: aiScore
         })
       });
+
+      if (responseData.error) {
+        throw new Error(responseData.error);
+      }
 
       if (currentQuestionIndex < testQuestions.length - 1) {
         setCurrentQuestionIndex(prev => prev + 1);
@@ -880,9 +896,9 @@ export default function App() {
                       <h2 className="text-2xl font-bold">Question {currentQuestionIndex + 1} of {testQuestions.length}</h2>
                     </div>
                     <div className="flex items-center gap-4">
-                      <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${proctoringWarnings === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : proctoringWarnings >= 3 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>
+                      <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${violationCount === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : violationCount >= 5 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>
                         <AlertTriangle size={16} />
-                        VIOLATIONS: {proctoringWarnings}/3
+                        VIOLATIONS: {violationCount}/5
                       </div>
                       <div className={`px-6 py-2 rounded-full border-2 border-black font-mono text-xl ${timeLeft < 10 ? 'bg-red-600 text-white animate-pulse' : ''}`}>
                         {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
@@ -1016,14 +1032,26 @@ export default function App() {
                   userSessions.map(session => (
                     <div key={session.id} className="border-2 border-black p-6 rounded-2xl flex justify-between items-center">
                       <div>
-                        <p className="text-xs font-bold text-zinc-500 uppercase">{new Date(session.start_time).toLocaleDateString()}</p>
+                        <p className="text-xs font-bold text-zinc-500 uppercase">{new Date(session.start_time).toLocaleDateString()} • Module {session.module}</p>
                         <h3 className="text-xl font-bold">Session #{session.id}</h3>
                         <p className="text-sm">Status: <span className={`uppercase font-bold ${session.status === 'published' ? 'text-green-600' : 'text-zinc-400'}`}>{session.status}</span></p>
                       </div>
                       {session.status === 'published' ? (
-                        <div className="text-right">
-                          <p className="text-xs uppercase font-bold text-zinc-500">Total Score</p>
-                          <p className="text-3xl font-black">{((session.total_score || 0) + (session.total_explanation_score || 0)).toFixed(1)}</p>
+                        <div className="flex gap-8">
+                          <div className="text-right">
+                            <p className="text-[10px] uppercase font-bold text-zinc-400">Objective Score</p>
+                            <p className="text-xl font-black">{(session.total_score || 0)} / {session.total_questions}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[10px] uppercase font-bold text-zinc-400">Explanation Score</p>
+                            <p className="text-xl font-black">{(session.total_explanation_score / (session.total_questions * 10 || 1)).toFixed(1)} / 10</p>
+                          </div>
+                          <div className="text-right border-l-2 border-black pl-8">
+                            <p className="text-[10px] uppercase font-bold text-zinc-500">Total %</p>
+                            <p className="text-3xl font-black">
+                              {(((session.total_score / (session.total_questions || 1)) * 0.5 + (session.total_explanation_score / (session.total_questions * 100 || 1)) * 0.5) * 100).toFixed(1)}%
+                            </p>
+                          </div>
                         </div>
                       ) : (
                         <div className="text-zinc-400 italic text-sm">Awaiting review...</div>
@@ -1097,7 +1125,7 @@ export default function App() {
                               <p className="font-bold">{res.first_name} {res.last_name}</p>
                               <p className="text-xs text-zinc-500">{res.employee_id}</p>
                             </td>
-                            <td className="p-4 font-medium">Module {res.id}</td>
+                            <td className="p-4 font-medium">Module {res.module || 'N/A'}</td>
                             <td className="p-4">
                               <span className={`text-[10px] font-black uppercase px-2 py-1 rounded ${res.status === 'published' ? 'bg-green-100 text-green-700' : (res.status === 'suspended' ? 'bg-red-100 text-red-700' : 'bg-zinc-100 text-zinc-600')}`}>
                                 {res.status}

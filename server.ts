@@ -37,6 +37,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS test_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
+    module INTEGER,
+    total_questions INTEGER DEFAULT 0,
     start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     end_time DATETIME,
     status TEXT DEFAULT 'in_progress', -- 'in_progress', 'completed', 'published', 'suspended', 'denied'
@@ -69,11 +71,49 @@ db.exec(`
   );
 `);
 
+// Migration: Ensure violation_count, module, total_questions exist in test_sessions
+try {
+  const columns = db.prepare("PRAGMA table_info(test_sessions)").all() as any[];
+  const hasViolationCount = columns.some(c => c.name === 'violation_count');
+  if (!hasViolationCount) {
+    console.log("[SERVER] Adding violation_count column to test_sessions...");
+    db.prepare("ALTER TABLE test_sessions ADD COLUMN violation_count INTEGER DEFAULT 0").run();
+  }
+  const hasModule = columns.some(c => c.name === 'module');
+  if (!hasModule) {
+    console.log("[SERVER] Adding module column to test_sessions...");
+    db.prepare("ALTER TABLE test_sessions ADD COLUMN module INTEGER").run();
+  }
+  const hasTotalQuestions = columns.some(c => c.name === 'total_questions');
+  if (!hasTotalQuestions) {
+    console.log("[SERVER] Adding total_questions column to test_sessions...");
+    db.prepare("ALTER TABLE test_sessions ADD COLUMN total_questions INTEGER DEFAULT 0").run();
+  }
+} catch (e) {
+  console.error("[SERVER] Migration error:", e);
+}
+
 // Seed Admin if not exists
 const admin = db.prepare("SELECT * FROM users WHERE user_id = ?").get("admin");
 if (!admin) {
   db.prepare("INSERT INTO users (first_name, last_name, employee_id, user_id, password, role) VALUES (?, ?, ?, ?, ?, ?)")
     .run("System", "Admin", "ADMIN001", "admin", "mortgage2026", "admin");
+}
+
+// Seed sample questions if empty
+const questionCount = db.prepare("SELECT COUNT(*) as count FROM questions").get() as any;
+if (questionCount.count === 0) {
+  const insertQ = db.prepare("INSERT INTO questions (type, text, options, correct_answer, master_rationale, format, module, time_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  
+  // Module 1
+  insertQ.run('mcq', 'What is the primary purpose of a Debt-to-Income (DTI) ratio in mortgage underwriting?', JSON.stringify(['To determine the property value', 'To assess the borrower\'s ability to manage monthly payments', 'To calculate the interest rate', 'To verify employment history']), 'b', 'DTI is a key metric used to evaluate if a borrower can afford the new mortgage payment alongside existing debts.', 'Text', 1, 60);
+  insertQ.run('yesno', 'Is a credit score of 580 generally sufficient for a standard conventional mortgage?', null, 'No', 'Conventional loans typically require a minimum score of 620, though FHA loans may allow 580.', 'Text', 1, 60);
+  insertQ.run('specific', 'What is the maximum standard LTV ratio for a primary residence conventional loan without PMI?', null, '80', 'LTV ratios above 80% typically require Private Mortgage Insurance (PMI).', 'Number', 1, 60);
+  
+  // Module 2
+  insertQ.run('mcq', 'Which document is most critical for verifying self-employed income?', JSON.stringify(['W-2 forms', 'Pay stubs', 'Two years of personal and business tax returns', 'Bank statements only']), 'c', 'Self-employed income requires a comprehensive review of tax returns to determine stable, ongoing income.', 'Text', 2, 60);
+  
+  console.log("[SERVER] Seeded sample questions.");
 }
 
 async function startServer() {
@@ -129,8 +169,8 @@ async function startServer() {
         questions.forEach((q: any) => insertQuestion.run(q.id, q.type, q.text, q.options, q.correct_answer, q.master_rationale, q.format, q.module, q.time_limit));
 
         // Restore sessions
-        const insertSession = db.prepare("INSERT INTO test_sessions (id, user_id, start_time, end_time, status, total_score, total_explanation_score) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        test_sessions.forEach((s: any) => insertSession.run(s.id, s.user_id, s.start_time, s.end_time, s.status, s.total_score, s.total_explanation_score));
+        const insertSession = db.prepare("INSERT INTO test_sessions (id, user_id, module, total_questions, start_time, end_time, status, total_score, total_explanation_score, violation_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        test_sessions.forEach((s: any) => insertSession.run(s.id, s.user_id, s.module, s.total_questions, s.start_time, s.end_time, s.status, s.total_score, s.total_explanation_score, s.violation_count));
 
         // Restore responses
         const insertResponse = db.prepare("INSERT INTO responses (id, session_id, question_id, answer, explanation, ai_explanation_score, admin_score, admin_explanation_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
@@ -195,8 +235,10 @@ async function startServer() {
 
   // Test Sessions
   app.post(["/api/sessions", "/api/sessions/"], (req, res) => {
-    const { userId } = req.body;
-    const result = db.prepare("INSERT INTO test_sessions (user_id) VALUES (?)").run(userId);
+    const { userId, module } = req.body;
+    const qCount = db.prepare("SELECT COUNT(*) as count FROM questions WHERE module = ?").get(module) as any;
+    const result = db.prepare("INSERT INTO test_sessions (user_id, module, total_questions) VALUES (?, ?, ?)")
+      .run(userId, module, qCount.count);
     res.json({ success: true, sessionId: result.lastInsertRowid });
   });
 
@@ -204,6 +246,33 @@ async function startServer() {
     const { questionId, answer, explanation, aiScore } = req.body;
     db.prepare("INSERT INTO responses (session_id, question_id, answer, explanation, ai_explanation_score) VALUES (?, ?, ?, ?, ?)")
       .run(req.params.id, questionId, answer, explanation, aiScore);
+    res.json({ success: true });
+  });
+
+  app.post(["/api/sessions/:id/complete", "/api/sessions/:id/complete/"], (req, res) => {
+    const sessionId = req.params.id;
+    
+    // Calculate scores
+    const responses = db.prepare(`
+      SELECT r.*, q.correct_answer 
+      FROM responses r 
+      JOIN questions q ON r.question_id = q.id 
+      WHERE r.session_id = ?
+    `).all(sessionId) as any[];
+    
+    let totalScore = 0;
+    let totalAiScore = 0;
+    
+    responses.forEach(r => {
+      if (r.answer && r.correct_answer && r.answer.toLowerCase().trim() === r.correct_answer.toLowerCase().trim()) {
+        totalScore += 1;
+      }
+      totalAiScore += (r.ai_explanation_score || 0);
+    });
+    
+    db.prepare("UPDATE test_sessions SET status = 'completed', end_time = CURRENT_TIMESTAMP, total_score = ?, total_explanation_score = ? WHERE id = ?")
+      .run(totalScore, totalAiScore, sessionId);
+      
     res.json({ success: true });
   });
 
