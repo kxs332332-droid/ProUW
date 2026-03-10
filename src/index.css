@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-white text-black font-sans;
+  }
+}
+
+.watermark {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  font-size: 8vw;
+  color: rgba(0, 0, 0, 0.03);
+  pointer-events: none;
+  z-index: 9999;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media print {
+  body {
+    display: none;
+  }
+}

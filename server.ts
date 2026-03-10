@@ -1,0 +1,365 @@
+import express from "express";
+import { createServer as createViteServer } from "vite";
+import Database from "better-sqlite3";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const db = new Database("prouw.db");
+
+// Initialize Database
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_name TEXT,
+    last_name TEXT,
+    employee_id TEXT UNIQUE,
+    user_id TEXT UNIQUE,
+    password TEXT,
+    role TEXT DEFAULT 'user'
+  );
+
+  CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT, -- 'mcq', 'yesno', 'specific'
+    text TEXT,
+    options TEXT, -- JSON string for MCQ options
+    correct_answer TEXT,
+    master_rationale TEXT,
+    format TEXT, -- 'Text' or 'Number' for specific
+    module INTEGER,
+    time_limit INTEGER DEFAULT 60
+  );
+
+  CREATE TABLE IF NOT EXISTS test_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    end_time DATETIME,
+    status TEXT DEFAULT 'in_progress', -- 'in_progress', 'completed', 'published', 'suspended', 'denied'
+    total_score REAL DEFAULT 0,
+    total_explanation_score REAL DEFAULT 0,
+    violation_count INTEGER DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS responses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    question_id INTEGER,
+    answer TEXT,
+    explanation TEXT,
+    ai_explanation_score REAL,
+    admin_score REAL,
+    admin_explanation_score REAL,
+    FOREIGN KEY(session_id) REFERENCES test_sessions(id),
+    FOREIGN KEY(question_id) REFERENCES questions(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    details TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+`);
+
+// Seed Admin if not exists
+const admin = db.prepare("SELECT * FROM users WHERE user_id = ?").get("admin");
+if (!admin) {
+  db.prepare("INSERT INTO users (first_name, last_name, employee_id, user_id, password, role) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("System", "Admin", "ADMIN001", "admin", "mortgage2026", "admin");
+}
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json({ limit: '10mb' }));
+
+  // Request logger for debugging
+  app.use((req, res, next) => {
+    console.log(`[SERVER] ${req.method} ${req.url}`);
+    next();
+  });
+
+  // --- API Routes ---
+
+  // Health check
+  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+
+  // Backup & Restore
+  app.get(["/api/admin/backup", "/api/admin/backup/"], (req, res) => {
+    try {
+      const data = {
+        users: db.prepare("SELECT * FROM users").all(),
+        questions: db.prepare("SELECT * FROM questions").all(),
+        test_sessions: db.prepare("SELECT * FROM test_sessions").all(),
+        responses: db.prepare("SELECT * FROM responses").all(),
+        activity_logs: db.prepare("SELECT * FROM activity_logs").all(),
+      };
+      res.json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post(["/api/admin/restore", "/api/admin/restore/"], (req, res) => {
+    const { users, questions, test_sessions, responses, activity_logs } = req.body;
+    try {
+      db.transaction(() => {
+        // Clear existing data
+        db.prepare("DELETE FROM responses").run();
+        db.prepare("DELETE FROM test_sessions").run();
+        db.prepare("DELETE FROM questions").run();
+        db.prepare("DELETE FROM activity_logs").run();
+        db.prepare("DELETE FROM users").run();
+
+        // Restore users
+        const insertUser = db.prepare("INSERT INTO users (id, first_name, last_name, employee_id, user_id, password, role) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        users.forEach((u: any) => insertUser.run(u.id, u.first_name, u.last_name, u.employee_id, u.user_id, u.password, u.role));
+
+        // Restore questions
+        const insertQuestion = db.prepare("INSERT INTO questions (id, type, text, options, correct_answer, master_rationale, format, module, time_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        questions.forEach((q: any) => insertQuestion.run(q.id, q.type, q.text, q.options, q.correct_answer, q.master_rationale, q.format, q.module, q.time_limit));
+
+        // Restore sessions
+        const insertSession = db.prepare("INSERT INTO test_sessions (id, user_id, start_time, end_time, status, total_score, total_explanation_score) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        test_sessions.forEach((s: any) => insertSession.run(s.id, s.user_id, s.start_time, s.end_time, s.status, s.total_score, s.total_explanation_score));
+
+        // Restore responses
+        const insertResponse = db.prepare("INSERT INTO responses (id, session_id, question_id, answer, explanation, ai_explanation_score, admin_score, admin_explanation_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        responses.forEach((r: any) => insertResponse.run(r.id, r.session_id, r.question_id, r.answer, r.explanation, r.ai_explanation_score, r.admin_score, r.admin_explanation_score));
+
+        // Restore logs
+        const insertLog = db.prepare("INSERT INTO activity_logs (id, user_id, action, timestamp, details) VALUES (?, ?, ?, ?, ?)");
+        activity_logs.forEach((l: any) => insertLog.run(l.id, l.user_id, l.action, l.timestamp, l.details));
+      })();
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Auth
+  app.post(["/api/register", "/api/register/"], (req, res) => {
+    const { firstName, lastName, employeeId, userId, password } = req.body;
+    try {
+      const result = db.prepare("INSERT INTO users (first_name, last_name, employee_id, user_id, password) VALUES (?, ?, ?, ?, ?)")
+        .run(firstName, lastName, employeeId, userId, password);
+      res.json({ success: true, userId: result.lastInsertRowid });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post(["/api/login", "/api/login/"], (req, res) => {
+    const { userId, password } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE user_id = ? AND password = ?").get(userId, password);
+    if (user) {
+      res.json({ success: true, user });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  });
+
+  // Questions
+  app.get(["/api/questions", "/api/questions/"], (req, res) => {
+    const questions = db.prepare("SELECT * FROM questions").all();
+    res.json(questions.map((q: any) => ({ ...q, options: q.options ? JSON.parse(q.options) : null })));
+  });
+
+  app.post(["/api/questions", "/api/questions/"], (req, res) => {
+    const { type, text, options, correct_answer, master_rationale, format, module, time_limit } = req.body;
+    const result = db.prepare("INSERT INTO questions (type, text, options, correct_answer, master_rationale, format, module, time_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(type, text, JSON.stringify(options), correct_answer, master_rationale, format, module, time_limit);
+    res.json({ success: true, id: result.lastInsertRowid });
+  });
+
+  app.put("/api/questions/:id", (req, res) => {
+    const { type, text, options, correct_answer, master_rationale, format, module, time_limit } = req.body;
+    db.prepare("UPDATE questions SET type = ?, text = ?, options = ?, correct_answer = ?, master_rationale = ?, format = ?, module = ?, time_limit = ? WHERE id = ?")
+      .run(type, text, JSON.stringify(options), correct_answer, master_rationale, format, module, time_limit, req.params.id);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/questions/:id", (req, res) => {
+    db.prepare("DELETE FROM questions WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  // Test Sessions
+  app.post(["/api/sessions", "/api/sessions/"], (req, res) => {
+    const { userId } = req.body;
+    const result = db.prepare("INSERT INTO test_sessions (user_id) VALUES (?)").run(userId);
+    res.json({ success: true, sessionId: result.lastInsertRowid });
+  });
+
+  app.post(["/api/sessions/:id/responses", "/api/sessions/:id/responses/"], (req, res) => {
+    const { questionId, answer, explanation, aiScore } = req.body;
+    db.prepare("INSERT INTO responses (session_id, question_id, answer, explanation, ai_explanation_score) VALUES (?, ?, ?, ?, ?)")
+      .run(req.params.id, questionId, answer, explanation, aiScore);
+    res.json({ success: true });
+  });
+
+  app.post(["/api/sessions/:id/violation", "/api/sessions/:id/violation/"], (req, res) => {
+    const { reason } = req.body;
+    db.prepare("UPDATE test_sessions SET violation_count = violation_count + 1 WHERE id = ?").run(req.params.id);
+    const session = db.prepare("SELECT violation_count FROM test_sessions WHERE id = ?").get(req.params.id) as any;
+    
+    if (session.violation_count >= 5) {
+      db.prepare("UPDATE test_sessions SET status = 'suspended' WHERE id = ?").run(req.params.id);
+      res.json({ success: true, suspended: true, count: session.violation_count });
+    } else {
+      res.json({ success: true, suspended: false, count: session.violation_count });
+    }
+  });
+
+  app.post(["/api/admin/sessions/:id/approve", "/api/admin/sessions/:id/approve/"], (req, res) => {
+    db.prepare("UPDATE test_sessions SET status = 'in_progress' WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  app.post(["/api/admin/sessions/:id/deny", "/api/admin/sessions/:id/deny/"], (req, res) => {
+    db.prepare("UPDATE test_sessions SET status = 'denied', end_time = CURRENT_TIMESTAMP WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  app.get(["/api/sessions/active/:userId", "/api/sessions/active/:userId/"], (req, res) => {
+    const session = db.prepare("SELECT * FROM test_sessions WHERE user_id = ? AND (status = 'in_progress' OR status = 'suspended') ORDER BY start_time DESC LIMIT 1").get(req.params.userId);
+    res.json(session || null);
+  });
+
+  app.delete(["/api/sessions/:id", "/api/sessions/:id/"], (req, res) => {
+    db.prepare("DELETE FROM responses WHERE session_id = ?").run(req.params.id);
+    db.prepare("DELETE FROM test_sessions WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  app.get(["/api/sessions/user/:userId", "/api/sessions/user/:userId/"], (req, res) => {
+    const sessions = db.prepare(`
+      SELECT ts.*, 
+      (SELECT COUNT(*) FROM responses r WHERE r.session_id = ts.id) as response_count
+      FROM test_sessions ts 
+      WHERE ts.user_id = ?
+      ORDER BY ts.start_time DESC
+    `).all(req.params.userId);
+    res.json(sessions);
+  });
+
+  // Admin Results
+  app.get(["/api/admin/results", "/api/admin/results/"], (req, res) => {
+    const results = db.prepare(`
+      SELECT ts.*, u.first_name, u.last_name, u.employee_id, u.user_id as username
+      FROM test_sessions ts
+      JOIN users u ON ts.user_id = u.id
+      ORDER BY ts.start_time DESC
+    `).all();
+    res.json(results);
+  });
+
+  app.get(["/api/admin/results/:sessionId", "/api/admin/results/:sessionId/"], (req, res) => {
+    const responses = db.prepare(`
+      SELECT r.*, q.text as question_text, q.correct_answer as q_correct_answer, q.master_rationale, q.type as q_type
+      FROM responses r
+      JOIN questions q ON r.question_id = q.id
+      WHERE r.session_id = ?
+    `).all(req.params.sessionId);
+    res.json(responses);
+  });
+
+  app.post(["/api/admin/results/:sessionId/publish", "/api/admin/results/:sessionId/publish/"], (req, res) => {
+    const { responses } = req.body; // Array of { id, admin_score, admin_explanation_score }
+    let totalScore = 0;
+    let totalExpScore = 0;
+
+    const updateResponse = db.prepare("UPDATE responses SET admin_score = ?, admin_explanation_score = ? WHERE id = ?");
+    
+    responses.forEach((r: any) => {
+      updateResponse.run(r.admin_score, r.admin_explanation_score, r.id);
+      totalScore += (r.admin_score || 0);
+      totalExpScore += (r.admin_explanation_score || 0);
+    });
+
+    db.prepare("UPDATE test_sessions SET status = 'published', total_score = ?, total_explanation_score = ? WHERE id = ?")
+      .run(totalScore, totalExpScore, req.params.sessionId);
+
+    res.json({ success: true });
+  });
+
+  // Admin Users
+  app.get(["/api/admin/users", "/api/admin/users/"], (req, res) => {
+    const users = db.prepare("SELECT id, first_name, last_name, employee_id, user_id, role FROM users").all();
+    res.json(users);
+  });
+
+  // Activity Logs
+  app.post(["/api/logs", "/api/logs/"], (req, res) => {
+    const { userId, action, details } = req.body;
+    db.prepare("INSERT INTO activity_logs (user_id, action, details) VALUES (?, ?, ?)")
+      .run(userId, action, details);
+    res.json({ success: true });
+  });
+
+  app.get(["/api/admin/logs", "/api/admin/logs/"], (req, res) => {
+    const logs = db.prepare(`
+      SELECT al.*, u.first_name, u.last_name, u.employee_id
+      FROM activity_logs al
+      JOIN users u ON al.user_id = u.id
+      ORDER BY al.timestamp DESC
+    `).all();
+    res.json(logs);
+  });
+
+  app.get(["/api/admin/repository", "/api/admin/repository/"], (req, res) => {
+    // Repository view: Last 30 days of everything
+    const days = 30;
+    const logs = db.prepare(`
+      SELECT al.*, u.first_name, u.last_name, u.employee_id
+      FROM activity_logs al
+      JOIN users u ON al.user_id = u.id
+      WHERE al.timestamp >= date('now', '-' || ? || ' days')
+      ORDER BY al.timestamp DESC
+    `).all(days);
+
+    const sessions = db.prepare(`
+      SELECT ts.*, u.first_name, u.last_name, u.employee_id
+      FROM test_sessions ts
+      JOIN users u ON ts.user_id = u.id
+      WHERE ts.start_time >= date('now', '-' || ? || ' days')
+      ORDER BY ts.start_time DESC
+    `).all(days);
+
+    res.json({ logs, sessions });
+  });
+
+  app.delete(["/api/admin/logs", "/api/admin/logs/"], (req, res) => {
+    db.prepare("DELETE FROM activity_logs").run();
+    res.json({ success: true });
+  });
+
+  // --- Vite Middleware ---
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
