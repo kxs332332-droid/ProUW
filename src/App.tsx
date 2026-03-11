@@ -58,6 +58,28 @@ const Input = ({ label, type = 'text', value, onChange, placeholder, required = 
   </div>
 );
 
+const Dialog = ({ isOpen, title, message, onConfirm, onCancel, type = 'alert' }: any) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+      <motion.div 
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-white border-4 border-black p-8 rounded-3xl max-w-md w-full shadow-[12px_12px_0px_0px_rgba(0,0,0,1)]"
+      >
+        <h3 className="text-2xl font-black mb-2 uppercase italic tracking-tighter">{title}</h3>
+        <p className="text-zinc-600 mb-8 font-medium">{message}</p>
+        <div className="flex gap-4">
+          {type === 'confirm' && (
+            <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+          )}
+          <Button onClick={onConfirm} className="flex-1">{type === 'confirm' ? 'Confirm' : 'OK'}</Button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 // --- Main App ---
 
 export default function App() {
@@ -73,6 +95,33 @@ export default function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [violationCount, setViolationCount] = useState(0);
+  const [dialog, setDialog] = useState<{ isOpen: boolean; title: string; message: string; onConfirm?: () => void; type: 'alert' | 'confirm' }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    type: 'alert'
+  });
+
+  const showAlert = (title: string, message: string) => {
+    setDialog({ isOpen: true, title, message, type: 'alert', onConfirm: () => setDialog(prev => ({ ...prev, isOpen: false })) });
+  };
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void, onCancel?: () => void) => {
+    setDialog({ 
+      isOpen: true, 
+      title, 
+      message, 
+      type: 'confirm', 
+      onConfirm: () => {
+        onConfirm();
+        setDialog(prev => ({ ...prev, isOpen: false }));
+      },
+      onCancel: () => {
+        if (onCancel) onCancel();
+        setDialog(prev => ({ ...prev, isOpen: false }));
+      }
+    } as any);
+  };
 
   const handleViolation = useCallback(async (reason: string) => {
     if (!activeSession) return;
@@ -91,7 +140,7 @@ export default function App() {
         if (document.fullscreenElement) document.exitFullscreen();
         logActivity('TEST_SUSPENDED', `Test suspended due to 5 violations. Reason: ${reason}`);
       } else {
-        alert(`Violation ${data.count}/5: ${reason}. Please follow all exam rules. The test will be suspended after 5 violations.`);
+        showAlert("Violation Warning", `Violation ${data.count}/5: ${reason}. Please follow all exam rules. The test will be suspended after 5 violations.`);
         logActivity('VIOLATION', reason);
       }
     }
@@ -111,7 +160,7 @@ export default function App() {
     setCameraError(error);
     setIsCameraActive(false);
     if (view === 'test') {
-      alert("CRITICAL ERROR: Camera access lost. The test will be terminated. Please contact Admin.\n\nDetails: " + error);
+      showAlert("Critical Error", "Camera access lost. The test will be terminated. Please contact Admin.\n\nDetails: " + error);
       setView('home');
       setActiveSession(null);
       if (document.fullscreenElement) document.exitFullscreen();
@@ -279,7 +328,7 @@ export default function App() {
       
       logActivity('LOGIN', 'User logged in');
     } else {
-      alert(data.error || "Invalid credentials");
+      showAlert("Login Failed", data.error || "Invalid credentials");
     }
   };
 
@@ -354,23 +403,29 @@ export default function App() {
           return;
         }
         if (existing.status === 'in_progress') {
-          const choice = confirm("You have an active session in progress.\n\nClick 'OK' to RESUME your existing session.\nClick 'Cancel' to START A NEW session (this will discard your current progress).");
-          
-          if (choice) {
-            setActiveSession(existing.id);
-            setViolationCount(existing.violation_count);
-            const resps = await safeFetch(`/api/admin/results/${existing.id}`);
-            if (Array.isArray(resps)) {
-              setCurrentQuestionIndex(resps.length);
-              setTimeLeft(120 * 60); 
+          showConfirm("Active Session", "You have an active session in progress.\n\nClick 'Confirm' to RESUME your existing session.\nClick 'Cancel' to START A NEW session (this will discard your current progress).", 
+            async () => {
+              setActiveSession(existing.id);
+              setViolationCount(existing.violation_count);
+              const resps = await safeFetch(`/api/admin/results/${existing.id}`);
+              if (Array.isArray(resps)) {
+                setCurrentQuestionIndex(resps.length);
+                setTimeLeft(120 * 60); 
+              }
+              setView('test');
+            },
+            async () => {
+              // Cancel existing session and proceed to start a new one
+              await safeFetch(`/api/sessions/${existing.id}`, { method: 'DELETE' });
+              logActivity('TEST_CANCELLED', `Cancelled existing session ${existing.id} to start new one`);
+              // We don't need to call proceedToTest again, because the code continues after this block
+              // Wait, if it's async, we need to make sure it doesn't block.
+              // Actually, the 'return' at the end of the if block prevents it from continuing.
+              // So we SHOULD call proceedToTest again or just let them click 'START' again.
+              // The original logic was: if (choice) { ... return; } else { ... } which means it continues.
             }
-            setView('test');
-            return;
-          } else {
-            // Cancel existing session and proceed to start a new one
-            await safeFetch(`/api/sessions/${existing.id}`, { method: 'DELETE' });
-            logActivity('TEST_CANCELLED', `Cancelled existing session ${existing.id} to start new one`);
-          }
+          );
+          return;
         }
       }
 
@@ -540,33 +595,37 @@ export default function App() {
   };
 
   const deleteQuestion = async (id: number) => {
-    if (!confirm("Are you sure you want to delete this question?")) return;
-    const data = await safeFetch(`/api/questions/${id}`, { method: 'DELETE' });
-    if (data.success) fetchAdminData();
+    showConfirm("Delete Question", "Are you sure you want to delete this question?", async () => {
+      const data = await safeFetch(`/api/questions/${id}`, { method: 'DELETE' });
+      if (data.success) fetchAdminData();
+    });
   };
 
   const deleteSession = async (id: number) => {
-    if (!confirm("Are you sure you want to delete this test session? This will remove all candidate responses for this session.")) return;
-    const data = await safeFetch(`/api/sessions/${id}`, { method: 'DELETE' });
-    if (data.success) fetchAdminData();
+    showConfirm("Delete Session", "Are you sure you want to delete this test session? This will remove all candidate responses for this session.", async () => {
+      const data = await safeFetch(`/api/sessions/${id}`, { method: 'DELETE' });
+      if (data.success) fetchAdminData();
+    });
   };
 
   const approveSession = async (id: number) => {
-    if (!confirm("Approve this session to continue?")) return;
-    const res = await safeFetch(`/api/admin/sessions/${id}/approve`, { method: 'POST' });
-    if (res.success) {
-      alert("Session approved. Candidate can now resume.");
-      fetchAdminData();
-    }
+    showConfirm("Approve Session", "Approve this session to continue?", async () => {
+      const res = await safeFetch(`/api/admin/sessions/${id}/approve`, { method: 'POST' });
+      if (res.success) {
+        showAlert("Success", "Session approved. Candidate can now resume.");
+        fetchAdminData();
+      }
+    });
   };
 
   const denySession = async (id: number) => {
-    if (!confirm("Deny this session? This will terminate the test permanently.")) return;
-    const res = await safeFetch(`/api/admin/sessions/${id}/deny`, { method: 'POST' });
-    if (res.success) {
-      alert("Session denied and terminated.");
-      fetchAdminData();
-    }
+    showConfirm("Deny Session", "Deny this session? This will terminate the test permanently.", async () => {
+      const res = await safeFetch(`/api/admin/sessions/${id}/deny`, { method: 'POST' });
+      if (res.success) {
+        showAlert("Success", "Session denied and terminated.");
+        fetchAdminData();
+      }
+    });
   };
 
   const openReview = async (session: TestSession) => {
@@ -1006,14 +1065,14 @@ export default function App() {
                   <Button onClick={async () => {
                     const session = await safeFetch(`/api/sessions/active/${currentUser?.id}`);
                     if (session && session.status === 'in_progress') {
-                      alert("Your session has been approved! You can now continue.");
+                      showAlert("Approved", "Your session has been approved! You can now continue.");
                       setView('home');
                     } else if (session && session.status === 'denied') {
-                      alert("Your session has been denied and terminated.");
+                      showAlert("Denied", "Your session has been denied and terminated.");
                       setView('home');
                       setActiveSession(null);
                     } else {
-                      alert("Your session is still awaiting review.");
+                      showAlert("Awaiting Review", "Your session is still awaiting review.");
                     }
                   }} className="w-full text-xl py-4">CHECK REVIEW STATUS</Button>
                   <Button variant="secondary" onClick={() => setView('home')} className="w-full text-xl py-4">RETURN TO DASHBOARD</Button>
@@ -1449,6 +1508,15 @@ export default function App() {
           )}
         </AnimatePresence>
       </main>
+
+      <Dialog 
+        isOpen={dialog.isOpen}
+        title={dialog.title}
+        message={dialog.message}
+        onConfirm={dialog.onConfirm}
+        onCancel={(dialog as any).onCancel || (() => setDialog(prev => ({ ...prev, isOpen: false })))}
+        type={dialog.type}
+      />
     </div>
   );
 }

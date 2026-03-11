@@ -290,7 +290,7 @@ async function startServer() {
   });
 
   app.post(["/api/admin/sessions/:id/approve", "/api/admin/sessions/:id/approve/"], (req, res) => {
-    db.prepare("UPDATE test_sessions SET status = 'in_progress' WHERE id = ?").run(req.params.id);
+    db.prepare("UPDATE test_sessions SET status = 'in_progress', violation_count = 0 WHERE id = ?").run(req.params.id);
     res.json({ success: true });
   });
 
