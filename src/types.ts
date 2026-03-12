@@ -1,5 +1,5 @@
 export interface User {
-  id: number;
+  id: string;
   first_name: string;
   last_name: string;
   employee_id: string;
@@ -8,7 +8,7 @@ export interface User {
 }
 
 export interface Question {
-  id: number;
+  id: string;
   type: 'mcq' | 'yesno' | 'specific';
   text: string;
   options: string[] | null;
@@ -20,12 +20,12 @@ export interface Question {
 }
 
 export interface TestSession {
-  id: number;
-  user_id: number;
+  id: string;
+  user_id: string;
   module: number;
   total_questions: number;
-  start_time: string;
-  end_time: string | null;
+  start_time: any; // Firestore Timestamp
+  end_time: any | null;
   status: 'in_progress' | 'completed' | 'published' | 'suspended' | 'denied';
   total_score: number;
   total_explanation_score: number;
@@ -38,9 +38,9 @@ export interface TestSession {
 }
 
 export interface Response {
-  id: number;
-  session_id: number;
-  question_id: number;
+  id: string;
+  session_id: string;
+  question_id: string;
   answer: string;
   explanation: string;
   ai_explanation_score: number;
@@ -53,10 +53,10 @@ export interface Response {
 }
 
 export interface ActivityLog {
-  id: number;
-  user_id: number;
+  id: string;
+  user_id: string;
   action: string;
-  timestamp: string;
+  timestamp: any; // Firestore Timestamp
   details: string;
   first_name?: string;
   last_name?: string;

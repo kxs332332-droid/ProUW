@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: first_name, last_name, employee_id, user_id, role
+    //
+    // Collection: questions
+    // Fields: type, text, options, correct_answer, master_rationale, format, module, time_limit
+    //
+    // Collection: test_sessions
+    // Fields: user_id, module, total_questions, start_time, end_time, status, total_score, total_explanation_score, violation_count
+    //
+    // Collection: test_sessions/{sessionId}/responses
+    // Fields: session_id, question_id, answer, explanation, ai_explanation_score, admin_score, admin_explanation_score
+    //
+    // Collection: activity_logs
+    // Fields: user_id, action, timestamp, details
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+         (request.auth.token.email == "kxs332332@gmail.com")); // Removed email_verified check for easier initial admin access
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['first_name', 'last_name', 'employee_id', 'user_id', 'role']) &&
+             data.first_name is string && data.first_name.size() > 0 && data.first_name.size() < 100 &&
+             data.last_name is string && data.last_name.size() > 0 && data.last_name.size() < 100 &&
+             data.employee_id is string && data.employee_id.size() > 0 && data.employee_id.size() < 50 &&
+             data.user_id is string && data.user_id.size() > 0 && data.user_id.size() < 50 &&
+             data.role in ['user', 'admin'];
+    }
+
+    function isValidQuestion(data) {
+      return data.keys().hasAll(['type', 'text', 'correct_answer', 'module']) &&
+             data.type in ['mcq', 'yesno', 'specific'] &&
+             data.text is string && data.text.size() > 0 && data.text.size() < 2000 &&
+             data.correct_answer is string && data.correct_answer.size() > 0 && data.correct_answer.size() < 500 &&
+             data.module is int && data.module >= 1 && data.module <= 5;
+    }
+
+    function isValidSession(data) {
+      return data.keys().hasAll(['user_id', 'module', 'status']) &&
+             data.user_id is string &&
+             data.module is int &&
+             data.status in ['in_progress', 'completed', 'published', 'suspended', 'denied'] &&
+             (!('total_score' in data) || data.total_score is number) &&
+             (!('total_explanation_score' in data) || data.total_explanation_score is number);
+    }
+
+    function isValidResponse(data) {
+      return data.keys().hasAll(['session_id', 'question_id', 'answer']) &&
+             data.session_id is string &&
+             data.question_id is string &&
+             data.answer is string && data.answer.size() < 5000 &&
+             (!('admin_score' in data) || data.admin_score is number) &&
+             (!('admin_explanation_score' in data) || data.admin_explanation_score is number);
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['user_id', 'action', 'timestamp']) &&
+             data.user_id is string &&
+             data.action is string &&
+             data.timestamp is timestamp;
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role && isValidUser(request.resource.data)));
+    }
+
+    match /questions/{questionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidQuestion(request.resource.data);
+      allow update: if isAdmin() && isValidQuestion(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /test_sessions/{sessionId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.user_id == request.auth.uid);
+      allow create: if isAuthenticated() && isValidSession(request.resource.data) && request.resource.data.user_id == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        isAdmin() || 
+        (resource.data.user_id == request.auth.uid && isValidSession(request.resource.data) && request.resource.data.user_id == resource.data.user_id)
+      );
+      allow delete: if isAdmin();
+
+      match /responses/{responseId} {
+        allow read: if isAuthenticated() && (isAdmin() || get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid);
+        allow create: if isAuthenticated() && isValidResponse(request.resource.data) && get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid;
+        allow update: if isAdmin() && isValidResponse(request.resource.data);
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /activity_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() && isValidLog(request.resource.data) && request.resource.data.user_id == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+  }
+}

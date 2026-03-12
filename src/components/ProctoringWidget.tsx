@@ -2,9 +2,21 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Camera, AlertTriangle } from 'lucide-react';
 import { analyzeProctoring } from '../services/aiService';
+import { db } from '../firebase';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { handleFirestoreError } from '../App';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
 
 interface ProctoringWidgetProps {
-  userId: number;
+  userId: string;
   onWarning: (reason: string) => void;
   onCameraError: (error: string) => void;
   onReady?: () => void;
@@ -101,16 +113,17 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
             console.warn("Malpractice detected:", result.reason);
             onWarning(result.reason);
             
-            // Log to server
-            fetch('/api/logs', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                userId,
+            // Log to Firestore
+            try {
+              await addDoc(collection(db, 'activity_logs'), {
+                user_id: userId,
                 action: 'AI_PROCTORING_ALERT',
-                details: result.reason
-              })
-            }).catch(e => console.error("Failed to log proctoring alert", e));
+                details: result.reason,
+                timestamp: serverTimestamp()
+              });
+            } catch (e) {
+              handleFirestoreError(e, OperationType.CREATE, 'activity_logs');
+            }
           }
         }
         isAnalyzingRef.current = false;

@@ -25,6 +25,82 @@ import { User, Question, TestSession, Response, ActivityLog } from './types';
 import { QuestionCanvas } from './components/QuestionCanvas';
 import { ProctoringWidget } from './components/ProctoringWidget';
 import { scoreExplanation } from './services/aiService';
+import { auth, db } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  onAuthStateChanged, 
+  signOut 
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  query, 
+  where, 
+  orderBy, 
+  limit, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot,
+  Timestamp,
+  serverTimestamp,
+  writeBatch
+} from 'firebase/firestore';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+export const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+};
 
 // --- Components ---
 
@@ -48,7 +124,7 @@ const Input = ({ label, type = 'text', value, onChange, placeholder, required = 
     {label && <label className="text-sm font-semibold uppercase tracking-wider">{label}</label>}
     <input
       type={type}
-      value={value}
+      value={value === undefined || value === null || (typeof value === 'number' && isNaN(value)) ? '' : value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       required={required}
@@ -84,12 +160,13 @@ const Dialog = ({ isOpen, title, message, onConfirm, onCancel, type = 'alert' }:
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [view, setView] = useState<'home' | 'login' | 'register' | 'test' | 'admin' | 'results' | 'admin-login' | 'rules' | 'test-complete' | 'suspended'>('home');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isBlurred, setIsBlurred] = useState(false);
   const [proctoringWarnings, setProctoringWarnings] = useState(0);
-  const [activeSession, setActiveSession] = useState<number | null>(null);
+  const [activeSession, setActiveSession] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -123,28 +200,54 @@ export default function App() {
     } as any);
   };
 
-  const handleViolation = useCallback(async (reason: string) => {
-    if (!activeSession) return;
-    
-    const data = await safeFetch(`/api/sessions/${activeSession}/violation`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason })
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data() as User;
+          setCurrentUser({ ...userData, id: firebaseUser.uid as any });
+          setIsAdmin(userData.role === 'admin');
+        }
+      } else {
+        setCurrentUser(null);
+        setIsAdmin(false);
+      }
+      setIsAuthReady(true);
     });
+    return () => unsubscribe();
+  }, []);
 
-    if (data && data.success) {
-      setViolationCount(data.count);
-      if (data.suspended) {
+  const handleViolation = useCallback(async (reason: string) => {
+    if (!activeSession || !currentUser) return;
+    
+    try {
+      const sessionRef = doc(db, 'test_sessions', activeSession.toString());
+      const sessionDoc = await getDoc(sessionRef);
+      if (!sessionDoc.exists()) return;
+
+      const newCount = (sessionDoc.data().violation_count || 0) + 1;
+      const isSuspended = newCount >= 5;
+
+      await updateDoc(sessionRef, {
+        violation_count: newCount,
+        status: isSuspended ? 'suspended' : sessionDoc.data().status
+      });
+
+      setViolationCount(newCount);
+      if (isSuspended) {
         setView('suspended');
         setIsCameraActive(false);
         if (document.fullscreenElement) document.exitFullscreen();
         logActivity('TEST_SUSPENDED', `Test suspended due to 5 violations. Reason: ${reason}`);
       } else {
-        showAlert("Violation Warning", `Violation ${data.count}/5: ${reason}. Please follow all exam rules. The test will be suspended after 5 violations.`);
+        showAlert("Violation Warning", `Violation ${newCount}/5: ${reason}. Please follow all exam rules. The test will be suspended after 5 violations.`);
         logActivity('VIOLATION', reason);
       }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `test_sessions/${activeSession}`);
     }
-  }, [activeSession]);
+  }, [activeSession, currentUser]);
 
   const handleProctoringWarning = useCallback((reason: string) => {
     setProctoringWarnings(prev => {
@@ -206,9 +309,9 @@ export default function App() {
   const [testQuestions, setTestQuestions] = useState<Question[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(60);
-  const [answers, setAnswers] = useState<Record<number, { answer: string, explanation: string }>>({});
+  const [answers, setAnswers] = useState<Record<string, { answer: string, explanation: string }>>({});
 
-  const updateAnswer = (qId: number, field: 'answer' | 'explanation', value: string) => {
+  const updateAnswer = (qId: string, field: 'answer' | 'explanation', value: string) => {
     setAnswers(prev => ({
       ...prev,
       [qId]: {
@@ -263,34 +366,34 @@ export default function App() {
     };
   }, [view, activeSession, handleProctoringWarning]);
 
-  const safeFetch = async (url: string, options?: RequestInit) => {
-    try {
-      const res = await fetch(url, options);
-      const contentType = res.headers.get("content-type");
-      if (contentType && contentType.indexOf("application/json") !== -1) {
-        return await res.json();
-      }
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
-      return { success: res.ok };
-    } catch (error) {
-      console.error(`Fetch error for ${url}:`, error);
-      return { error: "Network or server error" };
-    }
-  };
-
   const logActivity = async (action: string, details: string) => {
     if (!currentUser) return;
-    await safeFetch('/api/logs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: currentUser.id, action, details })
-    });
+    try {
+      await addDoc(collection(db, 'activity_logs'), {
+        user_id: currentUser.id,
+        action,
+        details,
+        timestamp: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'activity_logs');
+    }
   };
 
   const fetchUserSessions = useCallback(async () => {
     if (!currentUser) return;
-    const data = await safeFetch(`/api/sessions/user/${currentUser.id}`);
-    if (Array.isArray(data)) setUserSessions(data);
+    try {
+      const q = query(
+        collection(db, 'test_sessions'), 
+        where('user_id', '==', currentUser.id),
+        orderBy('start_time', 'desc')
+      );
+      const snapshot = await getDocs(q);
+      const sessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      setUserSessions(sessions);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'test_sessions');
+    }
   }, [currentUser]);
 
   useEffect(() => {
@@ -299,36 +402,74 @@ export default function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const data = await safeFetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: loginId, password: loginPass })
-    });
-    if (data.success) {
-      setCurrentUser(data.user);
-      setIsAdmin(data.user.role === 'admin');
-      
-      if (data.user.role === 'admin') {
-        setView('admin');
-      } else {
-        // Check for active/suspended session
-        const session = await safeFetch(`/api/sessions/active/${data.user.id}`);
-        if (session && !session.error) {
-          setActiveSession(session.id);
-          setViolationCount(session.violation_count);
-          if (session.status === 'suspended') {
-            setView('suspended');
-          } else {
-            setView('home');
-          }
-        } else {
-          setView('home');
-        }
+    try {
+      let email = loginId;
+      if (!email.includes('@')) {
+        email = `${loginId}@pro-uw.com`;
       }
       
-      logActivity('LOGIN', 'User logged in');
-    } else {
-      showAlert("Login Failed", data.error || "Invalid credentials");
+      try {
+        const userCredential = await signInWithEmailAndPassword(auth, email, loginPass);
+        const firebaseUser = userCredential.user;
+        
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data() as User;
+          setCurrentUser({ ...userData, id: firebaseUser.uid });
+          setIsAdmin(userData.role === 'admin');
+          
+          if (userData.role === 'admin') {
+            setView('admin');
+          } else {
+            const q = query(
+              collection(db, 'test_sessions'),
+              where('user_id', '==', firebaseUser.uid),
+              where('status', 'in', ['in_progress', 'suspended']),
+              orderBy('start_time', 'desc'),
+              limit(1)
+            );
+            const sessionSnapshot = await getDocs(q);
+            if (!sessionSnapshot.empty) {
+              const session = sessionSnapshot.docs[0];
+              const sessionData = session.data();
+              setActiveSession(session.id);
+              setViolationCount(sessionData.violation_count);
+              if (sessionData.status === 'suspended') {
+                setView('suspended');
+              } else {
+                setView('home');
+              }
+            } else {
+              setView('home');
+            }
+          }
+          logActivity('LOGIN', 'User logged in');
+        } else {
+          showAlert("Login Failed", "User profile not found.");
+        }
+      } catch (authError: any) {
+        // Bootstrap Logic: If admin doesn't exist in Auth, create it once
+        if (loginId.toLowerCase() === 'admin' && loginPass === 'mortgage2026' && (authError.code === 'auth/user-not-found' || authError.code === 'auth/invalid-credential')) {
+          const userCredential = await createUserWithEmailAndPassword(auth, email, loginPass);
+          const firebaseUser = userCredential.user;
+          const adminData = {
+            first_name: 'System',
+            last_name: 'Admin',
+            employee_id: 'ADMIN001',
+            user_id: 'admin',
+            role: 'admin' as const
+          };
+          await setDoc(doc(db, 'users', firebaseUser.uid), adminData);
+          setCurrentUser({ ...adminData, id: firebaseUser.uid } as User);
+          setIsAdmin(true);
+          setView('admin');
+          showAlert("System Initialized", "Admin account created and logged in.");
+          return;
+        }
+        throw authError;
+      }
+    } catch (error: any) {
+      showAlert("Login Failed", error.message || "Invalid credentials");
     }
   };
 
@@ -336,58 +477,64 @@ export default function App() {
     e.preventDefault();
     
     // Validation
-    if (!regData.firstName.trim()) return alert("First Name is required");
-    if (!regData.lastName.trim()) return alert("Last Name is required");
-    if (!regData.employeeId.trim()) return alert("Employee ID is required");
-    if (!regData.userId.trim()) return alert("User ID is required");
+    if (!regData.firstName.trim()) return showAlert("Error", "First Name is required");
+    if (!regData.lastName.trim()) return showAlert("Error", "Last Name is required");
+    if (!regData.employeeId.trim()) return showAlert("Error", "Employee ID is required");
+    if (!regData.userId.trim()) return showAlert("Error", "User ID is required");
     
     if (regData.password.length < 6) {
-      return alert("Password must be at least 6 characters");
+      return showAlert("Error", "Password must be at least 6 characters");
     }
     
     const alphanumericRegex = /^[a-zA-Z0-9]+$/;
     if (!alphanumericRegex.test(regData.password)) {
-      return alert("Password must be alphanumeric (letters and numbers only)");
+      return showAlert("Error", "Password must be alphanumeric (letters and numbers only)");
     }
 
-    const data = await safeFetch('/api/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(regData)
-    });
-    
-    if (data && data.success) {
-      alert("Profile created successfully!");
+    try {
+      const email = `${regData.userId}@pro-uw.com`;
+      const userCredential = await createUserWithEmailAndPassword(auth, email, regData.password);
+      const firebaseUser = userCredential.user;
+
+      const userData = {
+        first_name: regData.firstName,
+        last_name: regData.lastName,
+        employee_id: regData.employeeId,
+        user_id: regData.userId,
+        role: 'user'
+      };
+
+      await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+      
+      showAlert("Success", "Profile created successfully!");
       setView('login');
       setRegData({ firstName: '', lastName: '', employeeId: '', userId: '', password: '' });
-    } else {
-      let errorMsg = data?.error || "Registration failed";
-      if (errorMsg.includes("UNIQUE constraint failed: users.employee_id")) {
-        errorMsg = "Employee ID already exists.";
-      } else if (errorMsg.includes("UNIQUE constraint failed: users.user_id")) {
-        errorMsg = "User ID already exists.";
-      }
-      alert(errorMsg);
+    } catch (error: any) {
+      showAlert("Registration Failed", error.message || "Registration failed");
     }
   };
 
   const startTest = async (module: number) => {
-    const allQs = await safeFetch('/api/questions');
-    if (!Array.isArray(allQs)) return alert("Failed to load questions.");
-    
-    const moduleQs = allQs.filter((q: any) => q.module === module);
-    if (moduleQs.length === 0) return alert("No questions in this module.");
+    try {
+      const q = query(collection(db, 'questions'), where('module', '==', module));
+      const snapshot = await getDocs(q);
+      const moduleQs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      
+      if (moduleQs.length === 0) return showAlert("Error", "No questions in this module.");
 
-    setTestQuestions(moduleQs);
-    setCurrentModule(module);
-    setIsCameraActive(false);
-    setCameraError(null);
-    setView('rules');
+      setTestQuestions(moduleQs);
+      setCurrentModule(module);
+      setIsCameraActive(false);
+      setCameraError(null);
+      setView('rules');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'questions');
+    }
   };
 
   const proceedToTest = async () => {
     if (!currentUser) {
-      alert("Session expired. Please login again.");
+      showAlert("Error", "Session expired. Please login again.");
       setView('login');
       return;
     }
@@ -395,34 +542,41 @@ export default function App() {
     setIsStarting(true);
     try {
       // Check for existing active/suspended session
-      const existing = await safeFetch(`/api/sessions/active/${currentUser.id}`);
-      if (existing && !existing.error) {
-        if (existing.status === 'suspended') {
-          alert("You have a suspended session. Please contact Admin.");
+      const q = query(
+        collection(db, 'test_sessions'),
+        where('user_id', '==', currentUser.id),
+        where('status', 'in', ['in_progress', 'suspended']),
+        orderBy('start_time', 'desc'),
+        limit(1)
+      );
+      const sessionSnapshot = await getDocs(q);
+      
+      if (!sessionSnapshot.empty) {
+        const session = sessionSnapshot.docs[0];
+        const sessionData = session.data();
+        
+        if (sessionData.status === 'suspended') {
+          showAlert("Suspended", "You have a suspended session. Please contact Admin.");
           setView('suspended');
           return;
         }
-        if (existing.status === 'in_progress') {
+        if (sessionData.status === 'in_progress') {
           showConfirm("Active Session", "You have an active session in progress.\n\nClick 'Confirm' to RESUME your existing session.\nClick 'Cancel' to START A NEW session (this will discard your current progress).", 
             async () => {
-              setActiveSession(existing.id);
-              setViolationCount(existing.violation_count);
-              const resps = await safeFetch(`/api/admin/results/${existing.id}`);
-              if (Array.isArray(resps)) {
-                setCurrentQuestionIndex(resps.length);
-                setTimeLeft(120 * 60); 
-              }
+              setActiveSession(session.id);
+              setViolationCount(sessionData.violation_count);
+              
+              const respSnapshot = await getDocs(collection(db, 'test_sessions', session.id, 'responses'));
+              setCurrentQuestionIndex(respSnapshot.size);
+              setTimeLeft(120 * 60); 
               setView('test');
             },
             async () => {
               // Cancel existing session and proceed to start a new one
-              await safeFetch(`/api/sessions/${existing.id}`, { method: 'DELETE' });
-              logActivity('TEST_CANCELLED', `Cancelled existing session ${existing.id} to start new one`);
-              // We don't need to call proceedToTest again, because the code continues after this block
-              // Wait, if it's async, we need to make sure it doesn't block.
-              // Actually, the 'return' at the end of the if block prevents it from continuing.
-              // So we SHOULD call proceedToTest again or just let them click 'START' again.
-              // The original logic was: if (choice) { ... return; } else { ... } which means it continues.
+              await deleteDoc(doc(db, 'test_sessions', session.id));
+              logActivity('TEST_CANCELLED', `Cancelled existing session ${session.id} to start new one`);
+              // Restart the process
+              proceedToTest();
             }
           );
           return;
@@ -436,44 +590,45 @@ export default function App() {
         }
       } catch (err) {
         console.error("Fullscreen request failed", err);
-        alert("Full screen mode is required to take the test. Please enable it.");
+        showAlert("Error", "Full screen mode is required to take the test. Please enable it.");
         return;
       }
 
-      const sessionData = await safeFetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: currentUser?.id, module: currentModule })
-      });
+      const newSession = {
+        user_id: currentUser.id,
+        module: currentModule,
+        total_questions: testQuestions.length,
+        status: 'in_progress',
+        start_time: serverTimestamp(),
+        violation_count: 0,
+        total_score: 0,
+        total_explanation_score: 0
+      };
 
-      if (sessionData.success) {
-        setActiveSession(sessionData.sessionId);
-        setCurrentQuestionIndex(0);
-        setTimeLeft(120 * 60); // 120 minutes for the entire module
-        setAnswers({});
-        setProctoringWarnings(0);
-        setView('test');
-        logActivity('TEST_START', `Started Module ${currentModule}`);
-      } else {
-        alert(sessionData.error || "Failed to start test session.");
-      }
+      const sessionRef = await addDoc(collection(db, 'test_sessions'), newSession);
+
+      setActiveSession(sessionRef.id);
+      setCurrentQuestionIndex(0);
+      setTimeLeft(120 * 60); 
+      setAnswers({});
+      setProctoringWarnings(0);
+      setView('test');
+      logActivity('TEST_START', `Started Module ${currentModule}`);
     } catch (err) {
-      console.error("Error starting test:", err);
-      alert("An unexpected error occurred while starting the test.");
+      handleFirestoreError(err, OperationType.WRITE, 'test_sessions');
     } finally {
       setIsStarting(false);
     }
   };
 
   const handleNextQuestion = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || !activeSession) return;
     setIsSubmitting(true);
     
     const currentQ = testQuestions[currentQuestionIndex];
     const userAns = answers[currentQ.id] || { answer: '', explanation: '' };
 
     try {
-      // AI Scoring - Fallback to 0 if AI service fails to ensure test continuity
       let aiScore = 0;
       try {
         const aiResult = await scoreExplanation(userAns.explanation, currentQ.master_rationale);
@@ -482,25 +637,44 @@ export default function App() {
         console.error("AI Scoring failed, defaulting to 0:", e);
       }
 
-      const responseData = await safeFetch(`/api/sessions/${activeSession}/responses`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          questionId: currentQ.id,
-          answer: userAns.answer,
-          explanation: userAns.explanation,
-          aiScore: aiScore
-        })
+      await addDoc(collection(db, 'test_sessions', activeSession, 'responses'), {
+        session_id: activeSession,
+        question_id: currentQ.id,
+        answer: userAns.answer,
+        explanation: userAns.explanation,
+        ai_explanation_score: aiScore,
+        admin_score: null,
+        admin_explanation_score: null
       });
-
-      if (responseData.error) {
-        throw new Error(responseData.error);
-      }
 
       if (currentQuestionIndex < testQuestions.length - 1) {
         setCurrentQuestionIndex(prev => prev + 1);
       } else {
-        await safeFetch(`/api/sessions/${activeSession}/complete`, { method: 'POST' });
+        // Complete session
+        const sessionRef = doc(db, 'test_sessions', activeSession);
+        
+        // Calculate scores
+        const respSnapshot = await getDocs(collection(db, 'test_sessions', activeSession, 'responses'));
+        const responses = respSnapshot.docs.map(d => d.data());
+        
+        let totalScore = 0;
+        let totalAiScore = 0;
+        
+        responses.forEach(r => {
+          const q = testQuestions.find(tq => tq.id === r.question_id);
+          if (q && r.answer && q.correct_answer && r.answer.toLowerCase().trim() === q.correct_answer.toLowerCase().trim()) {
+            totalScore += 1;
+          }
+          totalAiScore += (r.ai_explanation_score || 0);
+        });
+
+        await updateDoc(sessionRef, {
+          status: 'completed',
+          end_time: serverTimestamp(),
+          total_score: totalScore,
+          total_explanation_score: totalAiScore
+        });
+
         setView('test-complete');
         setActiveSession(null);
         setIsCameraActive(false);
@@ -508,8 +682,7 @@ export default function App() {
         logActivity('TEST_COMPLETE', 'Finished test session');
       }
     } catch (error) {
-      console.error("Error submitting response:", error);
-      alert("There was an error saving your response. Please try again.");
+      handleFirestoreError(error, OperationType.WRITE, `test_sessions/${activeSession}/responses`);
     } finally {
       setIsSubmitting(false);
     }
@@ -520,36 +693,71 @@ export default function App() {
       const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
       return () => clearInterval(timer);
     } else if (view === 'test' && timeLeft === 0) {
-      // Auto-submit current question and end test if time runs out
       const finishTest = async () => {
-        await safeFetch(`/api/sessions/${activeSession}/complete`, { method: 'POST' });
-        setView('home');
-        setActiveSession(null);
-        logActivity('TEST_TIMEOUT', 'Test ended due to time limit');
-        alert("Time is up! Your test has been submitted.");
+        if (!activeSession) return;
+        try {
+          const sessionRef = doc(db, 'test_sessions', activeSession);
+          await updateDoc(sessionRef, {
+            status: 'completed',
+            end_time: serverTimestamp()
+          });
+          setView('home');
+          setActiveSession(null);
+          logActivity('TEST_TIMEOUT', 'Test ended due to time limit');
+          showAlert("Timeout", "Time is up! Your test has been submitted.");
+        } catch (error) {
+          handleFirestoreError(error, OperationType.UPDATE, `test_sessions/${activeSession}`);
+        }
       };
       finishTest();
     }
-  }, [view, timeLeft]);
+  }, [view, timeLeft, activeSession]);
 
   // --- Admin Logic ---
 
   const fetchAdminData = useCallback(async () => {
-    if (adminTab === 'questions') {
-      const data = await safeFetch('/api/questions');
-      if (Array.isArray(data)) setQuestions(data);
-    } else if (adminTab === 'results') {
-      const data = await safeFetch('/api/admin/results');
-      if (Array.isArray(data)) setAdminResults(data);
-    } else if (adminTab === 'logs') {
-      const data = await safeFetch('/api/admin/logs');
-      if (Array.isArray(data)) setAdminLogs(data);
-    } else if (adminTab === 'repository') {
-      const data = await safeFetch('/api/admin/repository');
-      if (data && !data.error) setRepositoryData(data);
-    } else if (adminTab === 'users') {
-      const data = await safeFetch('/api/admin/users');
-      if (Array.isArray(data)) setAdminUsers(data);
+    try {
+      if (adminTab === 'questions') {
+        const snapshot = await getDocs(collection(db, 'questions'));
+        setQuestions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
+      } else if (adminTab === 'results') {
+        const snapshot = await getDocs(collection(db, 'test_sessions'));
+        const sessions = await Promise.all(snapshot.docs.map(async (sessionDoc) => {
+          const data = sessionDoc.data();
+          const userDoc = await getDoc(doc(db, 'users', data.user_id));
+          const userData = userDoc.exists() ? userDoc.data() : {};
+          return { id: sessionDoc.id, ...data, ...userData } as any;
+        }));
+        setAdminResults(sessions.sort((a, b) => b.start_time?.seconds - a.start_time?.seconds));
+      } else if (adminTab === 'logs') {
+        const q = query(collection(db, 'activity_logs'), orderBy('timestamp', 'desc'));
+        const snapshot = await getDocs(q);
+        const logs = await Promise.all(snapshot.docs.map(async (logDoc) => {
+          const data = logDoc.data();
+          const userDoc = await getDoc(doc(db, 'users', data.user_id));
+          const userData = userDoc.exists() ? userDoc.data() : {};
+          return { id: logDoc.id, ...data, ...userData } as any;
+        }));
+        setAdminLogs(logs);
+      } else if (adminTab === 'repository') {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
+        const logsQ = query(collection(db, 'activity_logs'), where('timestamp', '>=', Timestamp.fromDate(thirtyDaysAgo)), orderBy('timestamp', 'desc'));
+        const logsSnapshot = await getDocs(logsQ);
+        const logs = logsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+
+        const sessionsQ = query(collection(db, 'test_sessions'), where('start_time', '>=', Timestamp.fromDate(thirtyDaysAgo)), orderBy('start_time', 'desc'));
+        const sessionsSnapshot = await getDocs(sessionsQ);
+        const sessions = sessionsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+
+        setRepositoryData({ logs, sessions });
+      } else if (adminTab === 'users') {
+        const snapshot = await getDocs(collection(db, 'users'));
+        setAdminUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, adminTab);
     }
   }, [adminTab]);
 
@@ -577,135 +785,224 @@ export default function App() {
 
   const saveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    const method = editingQuestion?.id ? 'PUT' : 'POST';
-    const url = editingQuestion?.id ? `/api/questions/${editingQuestion.id}` : '/api/questions';
-    
-    const data = await safeFetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(editingQuestion)
-    });
-    if (data.success) {
+    try {
+      if (editingQuestion?.id) {
+        const { id, ...data } = editingQuestion;
+        await updateDoc(doc(db, 'questions', id), data);
+      } else {
+        await addDoc(collection(db, 'questions'), editingQuestion);
+      }
       setIsQuestionModalOpen(false);
       setEditingQuestion(null);
       fetchAdminData();
-    } else {
-      alert("Failed to save question.");
+    } catch (error) {
+      handleFirestoreError(error, editingQuestion?.id ? OperationType.UPDATE : OperationType.CREATE, editingQuestion?.id ? `questions/${editingQuestion.id}` : 'questions');
     }
   };
 
-  const deleteQuestion = async (id: number) => {
+  const deleteQuestion = async (id: string) => {
     showConfirm("Delete Question", "Are you sure you want to delete this question?", async () => {
-      const data = await safeFetch(`/api/questions/${id}`, { method: 'DELETE' });
-      if (data.success) fetchAdminData();
-    });
-  };
-
-  const deleteSession = async (id: number) => {
-    showConfirm("Delete Session", "Are you sure you want to delete this test session? This will remove all candidate responses for this session.", async () => {
-      const data = await safeFetch(`/api/sessions/${id}`, { method: 'DELETE' });
-      if (data.success) fetchAdminData();
-    });
-  };
-
-  const approveSession = async (id: number) => {
-    showConfirm("Approve Session", "Approve this session to continue?", async () => {
-      const res = await safeFetch(`/api/admin/sessions/${id}/approve`, { method: 'POST' });
-      if (res.success) {
-        showAlert("Success", "Session approved. Candidate can now resume.");
+      try {
+        await deleteDoc(doc(db, 'questions', id));
         fetchAdminData();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `questions/${id}`);
       }
     });
   };
 
-  const denySession = async (id: number) => {
+  const deleteSession = async (id: string) => {
+    showConfirm("Delete Session", "Are you sure you want to delete this test session? This will remove all candidate responses for this session.", async () => {
+      try {
+        const respSnapshot = await getDocs(collection(db, 'test_sessions', id, 'responses'));
+        const batch = writeBatch(db);
+        respSnapshot.docs.forEach(d => batch.delete(d.ref));
+        batch.delete(doc(db, 'test_sessions', id));
+        await batch.commit();
+        fetchAdminData();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `test_sessions/${id}`);
+      }
+    });
+  };
+
+  const approveSession = async (id: string) => {
+    showConfirm("Approve Session", "Approve this session to continue?", async () => {
+      try {
+        await updateDoc(doc(db, 'test_sessions', id), {
+          status: 'in_progress',
+          violation_count: 0
+        });
+        showAlert("Success", "Session approved. Candidate can now resume.");
+        fetchAdminData();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `test_sessions/${id}`);
+      }
+    });
+  };
+
+  const denySession = async (id: string) => {
     showConfirm("Deny Session", "Deny this session? This will terminate the test permanently.", async () => {
-      const res = await safeFetch(`/api/admin/sessions/${id}/deny`, { method: 'POST' });
-      if (res.success) {
+      try {
+        await updateDoc(doc(db, 'test_sessions', id), {
+          status: 'denied',
+          end_time: serverTimestamp()
+        });
         showAlert("Success", "Session denied and terminated.");
         fetchAdminData();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `test_sessions/${id}`);
       }
     });
   };
 
   const openReview = async (session: TestSession) => {
-    const data = await safeFetch(`/api/admin/results/${session.id}`);
-    if (Array.isArray(data)) {
-      setReviewResponses(data);
+    try {
+      const snapshot = await getDocs(collection(db, 'test_sessions', session.id.toString(), 'responses'));
+      const responses = await Promise.all(snapshot.docs.map(async (respDoc) => {
+        const data = respDoc.data();
+        const qDoc = await getDoc(doc(db, 'questions', data.question_id));
+        const qData = qDoc.exists() ? qDoc.data() : {};
+        return { 
+          id: respDoc.id, 
+          ...data, 
+          question_text: qData.text,
+          q_correct_answer: qData.correct_answer,
+          master_rationale: qData.master_rationale,
+          q_type: qData.type
+        } as any;
+      }));
+      setReviewResponses(responses);
       setReviewingSession(session);
       setIsReviewModalOpen(true);
-    } else {
-      alert("Failed to load responses.");
+    } catch (error) {
+      console.error("Error loading responses:", error);
+      showAlert("Error", "Failed to load responses.");
     }
   };
 
   const publishResults = async () => {
-    const data = await safeFetch(`/api/admin/results/${reviewingSession?.id}/publish`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ responses: reviewResponses })
-    });
-    if (data.success) {
+    if (!reviewingSession) return;
+    try {
+      const batch = writeBatch(db);
+      let totalScore = 0;
+      let totalExpScore = 0;
+
+      reviewResponses.forEach((r: any) => {
+        const respRef = doc(db, 'test_sessions', reviewingSession.id.toString(), 'responses', r.id);
+        const finalAdminScore = Number(r.admin_score ?? (r.answer === r.q_correct_answer ? 1 : 0)) || 0;
+        const finalExpScore = Number(r.admin_explanation_score ?? r.ai_explanation_score) || 0;
+        
+        batch.update(respRef, {
+          admin_score: finalAdminScore,
+          admin_explanation_score: finalExpScore
+        });
+        totalScore += finalAdminScore;
+        totalExpScore += finalExpScore;
+      });
+
+      batch.update(doc(db, 'test_sessions', reviewingSession.id.toString()), {
+        status: 'published',
+        total_score: totalScore,
+        total_explanation_score: totalExpScore
+      });
+
+      await batch.commit();
       setIsReviewModalOpen(false);
       fetchAdminData();
-      alert("Results published successfully!");
-    } else {
-      alert("Failed to publish results.");
+      showAlert("Success", "Results published successfully!");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `test_sessions/${reviewingSession.id}`);
+      showAlert("Error", "Failed to publish results.");
     }
   };
 
   const clearLogs = async () => {
-    if (!confirm("Are you sure you want to clear all activity logs? This action cannot be undone.")) return;
-    const data = await safeFetch('/api/admin/logs', { method: 'DELETE' });
-    if (data.success) {
-      fetchAdminData();
-      alert("Activity logs cleared.");
-    } else {
-      alert("Failed to clear logs.");
-    }
+    showConfirm("Clear Logs", "Are you sure you want to clear all activity logs? This action cannot be undone.", async () => {
+      try {
+        const snapshot = await getDocs(collection(db, 'activity_logs'));
+        const batch = writeBatch(db);
+        snapshot.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        fetchAdminData();
+        showAlert("Success", "Activity logs cleared.");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, 'activity_logs');
+      }
+    });
   };
 
   const downloadBackup = async () => {
-    const data = await safeFetch('/api/admin/backup');
-    if (data && !data.error) {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    try {
+      const collections = ['users', 'questions', 'test_sessions', 'activity_logs'];
+      const backup: any = {};
+      
+      for (const col of collections) {
+        const snapshot = await getDocs(collection(db, col));
+        backup[col] = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        if (col === 'test_sessions') {
+          for (const session of backup[col]) {
+            const respSnapshot = await getDocs(collection(db, 'test_sessions', session.id, 'responses'));
+            session.responses = respSnapshot.docs.map(rd => ({ id: rd.id, ...rd.data() }));
+          }
+        }
+      }
+
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `prouw_backup_${new Date().toISOString().split('T')[0]}.json`;
       a.click();
       URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Error downloading backup:", error);
     }
   };
 
   const restoreBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!confirm("RESTORE DATA: This will overwrite all current data. Are you sure?")) return;
+    
+    showConfirm("RESTORE DATA", "This will overwrite all current data. Are you sure?", async () => {
+      setIsRestoring(true);
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = JSON.parse(e.target?.result as string);
+          
+          const clearAndRestore = async (colName: string, items: any[]) => {
+            const snapshot = await getDocs(collection(db, colName));
+            for (const d of snapshot.docs) await deleteDoc(d.ref);
+            for (const item of items) {
+              const { id, responses, ...rest } = item;
+              await setDoc(doc(db, colName, id), rest);
+              if (responses) {
+                for (const r of responses) {
+                  const { id: rid, ...rRest } = r;
+                  await setDoc(doc(db, colName, id, 'responses', rid), rRest);
+                }
+              }
+            }
+          };
 
-    setIsRestoring(true);
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const data = JSON.parse(e.target?.result as string);
-        const res = await safeFetch('/api/admin/restore', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        });
-        if (res.success) {
-          alert("Data restored successfully. Please refresh or re-login.");
+          await clearAndRestore('users', data.users || []);
+          await clearAndRestore('questions', data.questions || []);
+          await clearAndRestore('test_sessions', data.test_sessions || []);
+          await clearAndRestore('activity_logs', data.activity_logs || []);
+
+          showAlert("Success", "Data restored successfully. Please refresh.");
           window.location.reload();
-        } else {
-          alert("Restore failed: " + res.error);
+        } catch (err) {
+          console.error("Restore failed:", err);
+          showAlert("Error", "Restore failed: " + (err as Error).message);
+        } finally {
+          setIsRestoring(false);
         }
-      } catch (err) {
-        alert("Invalid backup file.");
-      } finally {
-        setIsRestoring(false);
-      }
-    };
-    reader.readAsText(file);
+      };
+      reader.readAsText(file);
+    });
   };
 
   // --- Renderers ---
@@ -1063,16 +1360,31 @@ export default function App() {
                 </div>
                 <div className="flex flex-col gap-4">
                   <Button onClick={async () => {
-                    const session = await safeFetch(`/api/sessions/active/${currentUser?.id}`);
-                    if (session && session.status === 'in_progress') {
-                      showAlert("Approved", "Your session has been approved! You can now continue.");
-                      setView('home');
-                    } else if (session && session.status === 'denied') {
-                      showAlert("Denied", "Your session has been denied and terminated.");
-                      setView('home');
-                      setActiveSession(null);
-                    } else {
-                      showAlert("Awaiting Review", "Your session is still awaiting review.");
+                    if (!currentUser) return;
+                    try {
+                      const q = query(
+                        collection(db, 'test_sessions'),
+                        where('user_id', '==', currentUser.id),
+                        where('status', 'in', ['in_progress', 'suspended', 'denied']),
+                        orderBy('start_time', 'desc'),
+                        limit(1)
+                      );
+                      const snapshot = await getDocs(q);
+                      if (!snapshot.empty) {
+                        const session = snapshot.docs[0].data();
+                        if (session.status === 'in_progress') {
+                          showAlert("Approved", "Your session has been approved! You can now continue.");
+                          setView('home');
+                        } else if (session.status === 'denied') {
+                          showAlert("Denied", "Your session has been denied and terminated.");
+                          setView('home');
+                          setActiveSession(null);
+                        } else {
+                          showAlert("Awaiting Review", "Your session is still awaiting review.");
+                        }
+                      }
+                    } catch (error) {
+                      console.error("Error checking session status:", error);
                     }
                   }} className="w-full text-xl py-4">CHECK REVIEW STATUS</Button>
                   <Button variant="secondary" onClick={() => setView('home')} className="w-full text-xl py-4">RETURN TO DASHBOARD</Button>
@@ -1098,18 +1410,12 @@ export default function App() {
                       {session.status === 'published' ? (
                         <div className="flex gap-8">
                           <div className="text-right">
-                            <p className="text-[10px] uppercase font-bold text-zinc-400">Objective Score</p>
+                            <p className="text-[10px] uppercase font-bold text-zinc-400">Answer Score</p>
                             <p className="text-xl font-black">{(session.total_score || 0)} / {session.total_questions}</p>
                           </div>
                           <div className="text-right">
                             <p className="text-[10px] uppercase font-bold text-zinc-400">Explanation Score</p>
-                            <p className="text-xl font-black">{(session.total_explanation_score / (session.total_questions * 10 || 1)).toFixed(1)} / 10</p>
-                          </div>
-                          <div className="text-right border-l-2 border-black pl-8">
-                            <p className="text-[10px] uppercase font-bold text-zinc-500">Total %</p>
-                            <p className="text-3xl font-black">
-                              {(((session.total_score / (session.total_questions || 1)) * 0.5 + (session.total_explanation_score / (session.total_questions * 100 || 1)) * 0.5) * 100).toFixed(1)}%
-                            </p>
+                            <p className="text-xl font-black">{(Number(session.total_explanation_score) / (session.total_questions * 10 || 1)).toFixed(1)} / 10</p>
                           </div>
                         </div>
                       ) : (
@@ -1173,7 +1479,8 @@ export default function App() {
                           <th className="p-4 uppercase text-xs font-black">Module</th>
                           <th className="p-4 uppercase text-xs font-black">Status</th>
                           <th className="p-4 uppercase text-xs font-black">Violations</th>
-                          <th className="p-4 uppercase text-xs font-black">Score</th>
+                          <th className="p-4 uppercase text-xs font-black">Answer Score</th>
+                          <th className="p-4 uppercase text-xs font-black">Explanation Score</th>
                           <th className="p-4 uppercase text-xs font-black">Action</th>
                         </tr>
                       </thead>
@@ -1195,7 +1502,12 @@ export default function App() {
                                 {res.violation_count}
                               </span>
                             </td>
-                            <td className="p-4 font-bold">{res.total_score + res.total_explanation_score}</td>
+                            <td className="p-4 font-bold">
+                              {res.status === 'published' ? `${res.total_score} / ${res.total_questions}` : '-'}
+                            </td>
+                            <td className="p-4 font-bold">
+                              {res.status === 'published' ? `${(Number(res.total_explanation_score) / (res.total_questions * 10 || 1)).toFixed(1)} / 10` : '-'}
+                            </td>
                             <td className="p-4">
                               <div className="flex gap-2">
                                 {res.status === 'suspended' && (
@@ -1370,7 +1682,17 @@ export default function App() {
                         </div>
                         <div className="flex flex-col gap-1">
                           <label className="text-xs font-bold uppercase">Module (1-5)</label>
-                          <input type="number" min="1" max="5" className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.module || 1} onChange={e => setEditingQuestion({...editingQuestion, module: parseInt(e.target.value)})} />
+                          <input type="number" min="1" max="5" className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.module ?? ''} onChange={e => {
+                            const val = e.target.value === '' ? undefined : parseInt(e.target.value);
+                            setEditingQuestion({...editingQuestion, module: isNaN(val as any) ? undefined : val});
+                          }} />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <label className="text-xs font-bold uppercase">Time Limit (sec)</label>
+                          <input type="number" min="10" max="300" className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.time_limit ?? ''} onChange={e => {
+                            const val = e.target.value === '' ? undefined : parseInt(e.target.value);
+                            setEditingQuestion({...editingQuestion, time_limit: isNaN(val as any) ? undefined : val});
+                          }} />
                         </div>
                       </div>
 
@@ -1471,10 +1793,11 @@ export default function App() {
                               <input 
                                 type="number" min="0" max="1" 
                                 className="border-2 border-black p-2 rounded-lg text-black" 
-                                value={resp.admin_score ?? (resp.answer === resp.q_correct_answer ? 1 : 0)} 
+                                value={resp.admin_score ?? (resp.answer === resp.q_correct_answer ? 1 : 0) ?? ''} 
                                 onChange={e => {
                                   const newResps = [...reviewResponses];
-                                  newResps[idx].admin_score = parseInt(e.target.value);
+                                  const val = e.target.value === '' ? undefined : parseInt(e.target.value);
+                                  newResps[idx].admin_score = isNaN(val as any) ? undefined : val;
                                   setReviewResponses(newResps);
                                 }}
                               />
@@ -1484,10 +1807,11 @@ export default function App() {
                               <input 
                                 type="number" min="0" max="100" 
                                 className="border-2 border-black p-2 rounded-lg text-black" 
-                                value={resp.admin_explanation_score ?? resp.ai_explanation_score} 
+                                value={resp.admin_explanation_score ?? resp.ai_explanation_score ?? ''} 
                                 onChange={e => {
                                   const newResps = [...reviewResponses];
-                                  newResps[idx].admin_explanation_score = parseInt(e.target.value);
+                                  const val = e.target.value === '' ? undefined : parseInt(e.target.value);
+                                  newResps[idx].admin_explanation_score = isNaN(val as any) ? undefined : val;
                                   setReviewResponses(newResps);
                                 }}
                               />

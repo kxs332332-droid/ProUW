@@ -1,0 +1,42 @@
+[
+  {
+    "type": "mcq",
+    "text": "What is the primary purpose of a Debt-to-Income (DTI) ratio in mortgage underwriting?",
+    "options": ["To determine the property value", "To assess the borrower's ability to manage monthly payments", "To calculate the interest rate", "To verify employment history"],
+    "correct_answer": "b",
+    "master_rationale": "DTI is a key metric used to evaluate if a borrower can afford the new mortgage payment alongside existing debts.",
+    "format": "Text",
+    "module": 1,
+    "time_limit": 60
+  },
+  {
+    "type": "yesno",
+    "text": "Is a credit score of 580 generally sufficient for a standard conventional mortgage?",
+    "options": null,
+    "correct_answer": "No",
+    "master_rationale": "Conventional loans typically require a minimum score of 620, though FHA loans may allow 580.",
+    "format": "Text",
+    "module": 1,
+    "time_limit": 60
+  },
+  {
+    "type": "specific",
+    "text": "What is the maximum standard LTV ratio for a primary residence conventional loan without PMI?",
+    "options": null,
+    "correct_answer": "80",
+    "master_rationale": "LTV ratios above 80% typically require Private Mortgage Insurance (PMI).",
+    "format": "Number",
+    "module": 1,
+    "time_limit": 60
+  },
+  {
+    "type": "mcq",
+    "text": "Which document is most critical for verifying self-employed income?",
+    "options": ["W-2 forms", "Pay stubs", "Two years of personal and business tax returns", "Bank statements only"],
+    "correct_answer": "c",
+    "master_rationale": "Self-employed income requires a comprehensive review of tax returns to determine stable, ongoing income.",
+    "format": "Text",
+    "module": 2,
+    "time_limit": 60
+  }
+]
