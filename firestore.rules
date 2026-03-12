@@ -68,8 +68,8 @@ service cloud.firestore {
              data.session_id is string &&
              data.question_id is string &&
              data.answer is string && data.answer.size() < 5000 &&
-             (!('admin_score' in data) || data.admin_score is number) &&
-             (!('admin_explanation_score' in data) || data.admin_explanation_score is number);
+             (!('admin_score' in data) || data.admin_score is number || data.admin_score == null) &&
+             (!('admin_explanation_score' in data) || data.admin_explanation_score is number || data.admin_explanation_score == null);
     }
 
     function isValidLog(data) {

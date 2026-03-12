@@ -514,11 +514,15 @@ export default function App() {
     }
   };
 
+  const fetchQuestions = async (module: number) => {
+    const q = query(collection(db, 'questions'), where('module', '==', module));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+  };
+
   const startTest = async (module: number) => {
     try {
-      const q = query(collection(db, 'questions'), where('module', '==', module));
-      const snapshot = await getDocs(q);
-      const moduleQs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      const moduleQs = await fetchQuestions(module);
       
       if (moduleQs.length === 0) return showAlert("Error", "No questions in this module.");
 
@@ -563,6 +567,8 @@ export default function App() {
         if (sessionData.status === 'in_progress') {
           showConfirm("Active Session", "You have an active session in progress.\n\nClick 'Confirm' to RESUME your existing session.\nClick 'Cancel' to START A NEW session (this will discard your current progress).", 
             async () => {
+              const moduleQs = await fetchQuestions(sessionData.module);
+              setTestQuestions(moduleQs);
               setActiveSession(session.id);
               setViolationCount(sessionData.violation_count);
               
@@ -682,6 +688,7 @@ export default function App() {
         logActivity('TEST_COMPLETE', 'Finished test session');
       }
     } catch (error) {
+      showAlert("Error", "Failed to save response. Please check your connection and try again.");
       handleFirestoreError(error, OperationType.WRITE, `test_sessions/${activeSession}/responses`);
     } finally {
       setIsSubmitting(false);
@@ -1446,7 +1453,7 @@ export default function App() {
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
                     <h3 className="text-xl font-bold">Question Repository</h3>
-                    <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1, time_limit: 60 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
+                    <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
                   </div>
                   <div className="grid grid-cols-1 gap-4">
                     {questions.map(q => (
@@ -1685,13 +1692,6 @@ export default function App() {
                           <input type="number" min="1" max="5" className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.module ?? ''} onChange={e => {
                             const val = e.target.value === '' ? undefined : parseInt(e.target.value);
                             setEditingQuestion({...editingQuestion, module: isNaN(val as any) ? undefined : val});
-                          }} />
-                        </div>
-                        <div className="flex flex-col gap-1">
-                          <label className="text-xs font-bold uppercase">Time Limit (sec)</label>
-                          <input type="number" min="10" max="300" className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.time_limit ?? ''} onChange={e => {
-                            const val = e.target.value === '' ? undefined : parseInt(e.target.value);
-                            setEditingQuestion({...editingQuestion, time_limit: isNaN(val as any) ? undefined : val});
                           }} />
                         </div>
                       </div>
