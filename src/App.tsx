@@ -18,14 +18,26 @@ import {
   Eye,
   EyeOff,
   Camera,
-  AlertTriangle
+  AlertTriangle,
+  Search,
+  Send,
+  X,
+  FileText,
+  Edit,
+  Calculator as CalcIcon
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { User, Question, TestSession, Response, ActivityLog } from './types';
+import { GoogleGenAI } from "@google/genai";
+import { User, Question, TestSession, Response, ActivityLog, Resource } from './types';
 import { QuestionCanvas } from './components/QuestionCanvas';
 import { ProctoringWidget } from './components/ProctoringWidget';
+import { Calculator } from './components/Calculator';
+import { ResourceViewer } from './components/ResourceViewer';
 import { scoreExplanation } from './services/aiService';
-import { auth, db } from './firebase';
+import questionsData from './questions.json';
+import { auth, db, storage } from './firebase';
+import { handleFirestoreError, OperationType } from './utils/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
@@ -51,56 +63,7 @@ import {
   writeBatch
 } from 'firebase/firestore';
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-export const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-};
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 // --- Components ---
 
@@ -168,6 +131,7 @@ export default function App() {
   const [proctoringWarnings, setProctoringWarnings] = useState(0);
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
@@ -252,21 +216,23 @@ export default function App() {
   const handleProctoringWarning = useCallback((reason: string) => {
     setProctoringWarnings(prev => {
       const newCount = prev + 1;
-      // AI warnings are just documented, not counted as violations toward suspension
-      console.warn(`AI Proctoring Warning: ${reason}`);
-      logActivity('PROCTORING_WARNING', reason);
+      console.warn(`AI Proctoring Alert: ${reason}`);
+      logActivity('AI_PROCTORING_ALERT', reason);
       return newCount;
     });
-  }, [activeSession]);
+  }, [currentUser]);
+
+  const handleProctoringCheck = useCallback((details: string) => {
+    // Log routine checks silently to the activity log for audit purposes
+    logActivity('AI_PROCTORING_CHECK', details);
+  }, [currentUser]);
 
   const handleCameraError = useCallback((error: string) => {
     setCameraError(error);
     setIsCameraActive(false);
     if (view === 'test') {
-      showAlert("Critical Error", "Camera access lost. The test will be terminated. Please contact Admin.\n\nDetails: " + error);
-      setView('home');
-      setActiveSession(null);
-      if (document.fullscreenElement) document.exitFullscreen();
+      // Don't kick out immediately, just show a persistent warning
+      console.error("Camera access lost during test:", error);
     }
   }, [view]);
 
@@ -294,13 +260,119 @@ export default function App() {
   const [regData, setRegData] = useState({ firstName: '', lastName: '', employeeId: '', userId: '', password: '' });
 
   // Admin States
-  const [adminTab, setAdminTab] = useState<'questions' | 'results' | 'logs' | 'repository' | 'database' | 'users'>('questions');
+  const [adminTab, setAdminTab] = useState<'questions' | 'results' | 'logs' | 'repository' | 'database' | 'users' | 'resources'>('questions');
   const [repositoryData, setRepositoryData] = useState<{ logs: any[], sessions: any[] }>({ logs: [], sessions: [] });
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
   const [isRestoring, setIsRestoring] = useState(false);
+
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [editingQuestion, setEditingQuestion] = useState<Partial<Question> | null>(null);
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [reviewingSession, setReviewingSession] = useState<TestSession | null>(null);
+  const [reviewResponses, setReviewResponses] = useState<any[]>([]);
   const [adminResults, setAdminResults] = useState<TestSession[]>([]);
   const [adminLogs, setAdminLogs] = useState<ActivityLog[]>([]);
+  const [resources, setResources] = useState<Resource[]>([]);
+  const [isResourceModalOpen, setIsResourceModalOpen] = useState(false);
+  const [editingResource, setEditingResource] = useState<Partial<Resource> | null>(null);
+  const [activeResource, setActiveResource] = useState<Resource | null>(null);
+  const [resourceSearch, setResourceSearch] = useState('');
+  const [resourceFile, setResourceFile] = useState<File | null>(null);
+  const [savingResource, setSavingResource] = useState(false);
+
+  useEffect(() => {
+    if (view !== 'test') {
+      setActiveResource(null);
+      setIsCalculatorOpen(false);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (!isResourceModalOpen) {
+      setResourceFile(null);
+    }
+  }, [isResourceModalOpen]);
+
+  const fetchResources = useCallback(() => {
+    const q = query(collection(db, 'resources'), orderBy('timestamp', 'desc'));
+    return onSnapshot(q, (snapshot) => {
+      setResources(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Resource)));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'resources'));
+  }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      const unsub = fetchResources();
+      return () => unsub();
+    }
+  }, [currentUser, fetchResources]);
+
+  const saveResource = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingResource?.name) return;
+    
+    // If it's a link, we need a URL. If it's a file, we need either an existing URL or a new file.
+    if (editingResource.type === 'Link' && !editingResource.url) return;
+    if (editingResource.type !== 'Link' && !editingResource.url && !resourceFile) return;
+
+    try {
+      setSavingResource(true);
+      console.log('Starting saveResource...', { type: editingResource.type, hasFile: !!resourceFile });
+      let finalUrl = editingResource.url || '';
+
+      // Handle file upload to Firebase Storage if a new file is selected
+      if (resourceFile) {
+        console.log('Uploading file to Storage...', { name: resourceFile.name, size: resourceFile.size, type: resourceFile.type });
+        try {
+          const sanitizedName = resourceFile.name.replace(/[^a-zA-Z0-9.]/g, '_');
+          const fileRef = ref(storage, `resources/${Date.now()}_${sanitizedName}`);
+          const uploadResult = await uploadBytes(fileRef, resourceFile);
+          finalUrl = await getDownloadURL(uploadResult.ref);
+          console.log('File uploaded successfully. URL:', finalUrl);
+        } catch (uploadError: any) {
+          console.error('Storage Upload Error:', uploadError);
+          // Re-throw to be caught by the outer catch
+          throw uploadError;
+        }
+      }
+
+      const resourceData: any = {
+        name: editingResource.name,
+        type: editingResource.type || 'PDF',
+        url: finalUrl,
+        timestamp: editingResource.id ? editingResource.timestamp : serverTimestamp()
+      };
+
+      console.log('Saving to Firestore...', { id: editingResource.id, data: resourceData });
+
+      if (editingResource.id) {
+        await updateDoc(doc(db, 'resources', editingResource.id), resourceData);
+      } else {
+        await addDoc(collection(db, 'resources'), resourceData);
+      }
+      
+      console.log('Resource saved successfully to Firestore');
+      setIsResourceModalOpen(false);
+      setEditingResource(null);
+      setResourceFile(null);
+    } catch (error) {
+      console.error('Error in saveResource:', error);
+      handleFirestoreError(error, OperationType.WRITE, 'resources');
+    } finally {
+      setSavingResource(false);
+    }
+  };
+
+  const deleteResource = async (id: string) => {
+    showConfirm("Delete Resource", "Are you sure you want to delete this resource?", async () => {
+      try {
+        await deleteDoc(doc(db, 'resources', id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `resources/${id}`);
+      }
+    });
+  };
+
   const [userSessions, setUserSessions] = useState<TestSession[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -309,7 +381,7 @@ export default function App() {
   const [testQuestions, setTestQuestions] = useState<Question[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(60);
-  const [answers, setAnswers] = useState<Record<string, { answer: string, explanation: string }>>({});
+  const [answers, setAnswers] = useState<Record<string, { answer: string, explanation: string, sub_answers?: Record<string, string> }>>({});
 
   const updateAnswer = (qId: string, field: 'answer' | 'explanation', value: string) => {
     setAnswers(prev => ({
@@ -317,6 +389,19 @@ export default function App() {
       [qId]: {
         ...(prev[qId] || { answer: '', explanation: '' }),
         [field]: value
+      }
+    }));
+  };
+
+  const updateSubAnswer = (qId: string, subId: string, value: string) => {
+    setAnswers(prev => ({
+      ...prev,
+      [qId]: {
+        ...(prev[qId] || { answer: '', explanation: '', sub_answers: {} }),
+        sub_answers: {
+          ...(prev[qId]?.sub_answers || {}),
+          [subId]: value
+        }
       }
     }));
   };
@@ -632,7 +717,7 @@ export default function App() {
     setIsSubmitting(true);
     
     const currentQ = testQuestions[currentQuestionIndex];
-    const userAns = answers[currentQ.id] || { answer: '', explanation: '' };
+    const userAns = answers[currentQ.id] || { answer: '', explanation: '', sub_answers: {} };
 
     try {
       let aiScore = 0;
@@ -648,6 +733,7 @@ export default function App() {
         question_id: currentQ.id,
         answer: userAns.answer,
         explanation: userAns.explanation,
+        sub_answers: userAns.sub_answers || {},
         ai_explanation_score: aiScore,
         admin_score: null,
         admin_explanation_score: null
@@ -668,8 +754,17 @@ export default function App() {
         
         responses.forEach(r => {
           const q = testQuestions.find(tq => tq.id === r.question_id);
-          if (q && r.answer && q.correct_answer && r.answer.toLowerCase().trim() === q.correct_answer.toLowerCase().trim()) {
-            totalScore += 1;
+          if (q) {
+            if (q.type === 'testcase') {
+              q.sub_questions?.forEach(sub => {
+                const subAns = (r.sub_answers as any)?.[sub.id];
+                if (subAns && sub.correct_answer && subAns.toLowerCase().trim() === sub.correct_answer.toLowerCase().trim()) {
+                  totalScore += 1;
+                }
+              });
+            } else if (r.answer && q.correct_answer && r.answer.toLowerCase().trim() === q.correct_answer.toLowerCase().trim()) {
+              totalScore += 1;
+            }
           }
           totalAiScore += (r.ai_explanation_score || 0);
         });
@@ -752,11 +847,21 @@ export default function App() {
         
         const logsQ = query(collection(db, 'activity_logs'), where('timestamp', '>=', Timestamp.fromDate(thirtyDaysAgo)), orderBy('timestamp', 'desc'));
         const logsSnapshot = await getDocs(logsQ);
-        const logs = logsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+        const logs = await Promise.all(logsSnapshot.docs.map(async (logDoc) => {
+          const data = logDoc.data();
+          const userDoc = await getDoc(doc(db, 'users', data.user_id));
+          const userData = userDoc.exists() ? userDoc.data() : {};
+          return { id: logDoc.id, ...data, ...userData } as any;
+        }));
 
         const sessionsQ = query(collection(db, 'test_sessions'), where('start_time', '>=', Timestamp.fromDate(thirtyDaysAgo)), orderBy('start_time', 'desc'));
         const sessionsSnapshot = await getDocs(sessionsQ);
-        const sessions = sessionsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+        const sessions = await Promise.all(sessionsSnapshot.docs.map(async (sessionDoc) => {
+          const data = sessionDoc.data();
+          const userDoc = await getDoc(doc(db, 'users', data.user_id));
+          const userData = userDoc.exists() ? userDoc.data() : {};
+          return { id: sessionDoc.id, ...data, ...userData } as any;
+        }));
 
         setRepositoryData({ logs, sessions });
       } else if (adminTab === 'users') {
@@ -783,12 +888,7 @@ export default function App() {
     XLSX.writeFile(wb, `${fileName}_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
-  // Admin Modals
   const [isQuestionModalOpen, setIsQuestionModalOpen] = useState(false);
-  const [editingQuestion, setEditingQuestion] = useState<Partial<Question> | null>(null);
-  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
-  const [reviewingSession, setReviewingSession] = useState<TestSession | null>(null);
-  const [reviewResponses, setReviewResponses] = useState<Response[]>([]);
 
   const saveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -876,14 +976,15 @@ export default function App() {
           question_text: qData.text,
           q_correct_answer: qData.correct_answer,
           master_rationale: qData.master_rationale,
-          q_type: qData.type
+          q_type: qData.type,
+          q_sub_questions: qData.sub_questions
         } as any;
       }));
       setReviewResponses(responses);
       setReviewingSession(session);
       setIsReviewModalOpen(true);
     } catch (error) {
-      console.error("Error loading responses:", error);
+      handleFirestoreError(error, OperationType.LIST, `test_sessions/${session.id}/responses`);
       showAlert("Error", "Failed to load responses.");
     }
   };
@@ -897,7 +998,20 @@ export default function App() {
 
       reviewResponses.forEach((r: any) => {
         const respRef = doc(db, 'test_sessions', reviewingSession.id.toString(), 'responses', r.id);
-        const finalAdminScore = Number(r.admin_score ?? (r.answer === r.q_correct_answer ? 1 : 0)) || 0;
+        
+        let autoScore = 0;
+        if (r.q_type === 'testcase') {
+          r.q_sub_questions?.forEach((sub: any) => {
+            const subAns = r.sub_answers?.[sub.id];
+            if (subAns && sub.correct_answer && subAns.toLowerCase().trim() === sub.correct_answer.toLowerCase().trim()) {
+              autoScore += 1;
+            }
+          });
+        } else {
+          autoScore = (r.answer === r.q_correct_answer ? 1 : 0);
+        }
+
+        const finalAdminScore = Number(r.admin_score ?? autoScore) || 0;
         const finalExpScore = Number(r.admin_explanation_score ?? r.ai_explanation_score) || 0;
         
         batch.update(respRef, {
@@ -939,6 +1053,24 @@ export default function App() {
     });
   };
 
+  const seedQuestions = async () => {
+    showConfirm("Seed Questions", "This will add the default set of questions to the database. Are you sure?", async () => {
+      try {
+        const batch = writeBatch(db);
+        questionsData.forEach(q => {
+          const qRef = doc(collection(db, 'questions'));
+          batch.set(qRef, q);
+        });
+        await batch.commit();
+        fetchAdminData();
+        showAlert("Success", "Questions seeded successfully!");
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, 'questions');
+        showAlert("Error", "Failed to seed questions.");
+      }
+    });
+  };
+
   const downloadBackup = async () => {
     try {
       const collections = ['users', 'questions', 'test_sessions', 'activity_logs'];
@@ -964,7 +1096,8 @@ export default function App() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      console.error("Error downloading backup:", error);
+      handleFirestoreError(error, OperationType.LIST, 'backup');
+      showAlert("Error", "Failed to generate backup.");
     }
   };
 
@@ -980,17 +1113,22 @@ export default function App() {
           const data = JSON.parse(e.target?.result as string);
           
           const clearAndRestore = async (colName: string, items: any[]) => {
-            const snapshot = await getDocs(collection(db, colName));
-            for (const d of snapshot.docs) await deleteDoc(d.ref);
-            for (const item of items) {
-              const { id, responses, ...rest } = item;
-              await setDoc(doc(db, colName, id), rest);
-              if (responses) {
-                for (const r of responses) {
-                  const { id: rid, ...rRest } = r;
-                  await setDoc(doc(db, colName, id, 'responses', rid), rRest);
+            try {
+              const snapshot = await getDocs(collection(db, colName));
+              for (const d of snapshot.docs) await deleteDoc(d.ref);
+              for (const item of items) {
+                const { id, responses, ...rest } = item;
+                await setDoc(doc(db, colName, id), rest);
+                if (responses) {
+                  for (const r of responses) {
+                    const { id: rid, ...rRest } = r;
+                    await setDoc(doc(db, colName, id, 'responses', rid), rRest);
+                  }
                 }
               }
+            } catch (err) {
+              handleFirestoreError(err, OperationType.WRITE, colName);
+              throw err;
             }
           };
 
@@ -1058,18 +1196,19 @@ export default function App() {
         </div>
       </header>
 
-      {/* Proctoring Widget - Only for Test */}
-      {view === 'test' && currentUser && (
+      {/* Proctoring Widget - Only for Test and Rules */}
+      {(view === 'test' || view === 'rules') && currentUser && (
         <ProctoringWidget 
           key={cameraRetryKey}
           userId={currentUser.id} 
           onWarning={handleProctoringWarning} 
+          onCheck={handleProctoringCheck}
           onCameraError={handleCameraError}
           onReady={() => setIsCameraActive(true)}
         />
       )}
 
-      <main className="max-w-6xl mx-auto p-6">
+      <main className={`${(view === 'test' && activeResource) ? 'max-w-full p-0' : 'max-w-6xl p-6'} mx-auto transition-all duration-300`}>
         <AnimatePresence mode="wait">
           {view === 'home' && (
             <motion.div 
@@ -1225,6 +1364,39 @@ export default function App() {
                       <p className="text-zinc-600">You have 120 minutes to complete all questions in this module. The timer is global.</p>
                     </div>
                   </div>
+
+                  <div className="mt-8 p-6 border-2 border-black rounded-2xl bg-zinc-50">
+                    <div className="flex items-center gap-3 mb-4">
+                      <Camera className={isCameraActive ? "text-green-500" : "text-red-500"} />
+                      <h3 className="font-bold uppercase tracking-widest text-sm">Camera Verification</h3>
+                    </div>
+                    
+                    {!isCameraActive ? (
+                      <div className="space-y-4">
+                        <p className="text-sm text-zinc-600">Camera access is required for AI proctoring. Please ensure your camera is enabled and permitted in your browser settings.</p>
+                        {cameraError && (
+                          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 whitespace-pre-line">
+                            {cameraError}
+                          </div>
+                        )}
+                        <Button 
+                          variant="secondary" 
+                          className="w-full text-xs"
+                          onClick={() => {
+                            setCameraRetryKey(prev => prev + 1);
+                            setCameraError(null);
+                          }}
+                        >
+                          RETRY CAMERA ACCESS
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 text-green-600">
+                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                        <p className="text-sm font-bold uppercase">Camera Active & Verified</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="mt-12 pt-8 border-t-2 border-zinc-100 flex flex-col gap-4">
@@ -1232,7 +1404,7 @@ export default function App() {
                   <Button 
                     onClick={proceedToTest} 
                     className="w-full text-xl py-4"
-                    disabled={isStarting}
+                    disabled={isStarting || !isCameraActive}
                   >
                     {isStarting ? "STARTING..." : "I UNDERSTAND, START EXAM"}
                   </Button>
@@ -1243,7 +1415,7 @@ export default function App() {
           )}
 
           {view === 'test' && (
-            <motion.div key="test" className="py-10">
+            <motion.div key="test" className={activeResource ? "py-0" : "py-10"}>
               {!isFullscreen ? (
                 <div className="flex flex-col items-center justify-center py-20 text-center">
                   <Maximize size={64} className="mb-6" />
@@ -1252,85 +1424,151 @@ export default function App() {
                   <Button onClick={() => document.documentElement.requestFullscreen()}>ENTER FULL SCREEN</Button>
                 </div>
               ) : (
-                <div className="max-w-4xl mx-auto">
-                  <div className="flex justify-between items-center mb-8">
-                    <div>
-                      <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">Module {currentModule}</p>
-                      <h2 className="text-2xl font-bold">Question {currentQuestionIndex + 1} of {testQuestions.length}</h2>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${violationCount === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : violationCount >= 5 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>
-                        <AlertTriangle size={16} />
-                        VIOLATIONS: {violationCount}/5
-                      </div>
-                      <div className={`px-6 py-2 rounded-full border-2 border-black font-mono text-xl ${timeLeft < 10 ? 'bg-red-600 text-white animate-pulse' : ''}`}>
-                        {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mb-10 no-select">
-                    <QuestionCanvas text={testQuestions[currentQuestionIndex].text} className="mb-8" />
-                    
-                    <div className="space-y-6">
-                      {testQuestions[currentQuestionIndex].type === 'mcq' && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          {testQuestions[currentQuestionIndex].options?.map((opt, idx) => (
-                            <button
-                              key={idx}
-                              onClick={() => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', String.fromCharCode(97 + idx))}
-                              className={`p-4 border-2 rounded-xl text-left transition-all ${answers[testQuestions[currentQuestionIndex].id]?.answer === String.fromCharCode(97 + idx) ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black'}`}
-                            >
-                              <span className="font-bold mr-2 uppercase">{String.fromCharCode(97 + idx)}.</span> {opt}
-                            </button>
-                          ))}
+                  <div className={`mx-auto transition-all duration-500 ${activeResource ? 'max-w-full grid grid-cols-1 lg:grid-cols-2 gap-0 h-[calc(100vh-80px)]' : 'max-w-4xl'}`}>
+                    <div className={`flex flex-col ${activeResource ? 'overflow-y-auto p-8' : ''}`}>
+                      <div className="flex justify-between items-center mb-8">
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">Module {currentModule}</p>
+                          <h2 className="text-2xl font-bold">Question {currentQuestionIndex + 1} of {testQuestions.length}</h2>
                         </div>
-                      )}
-
-                      {testQuestions[currentQuestionIndex].type === 'yesno' && (
-                        <div className="flex gap-4">
-                          {['Yes', 'No'].map(opt => (
-                            <button
-                              key={opt}
-                              onClick={() => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', opt)}
-                              className={`flex-1 p-4 border-2 rounded-xl text-center font-bold transition-all ${answers[testQuestions[currentQuestionIndex].id]?.answer === opt ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black'}`}
-                            >
-                              {opt}
-                            </button>
-                          ))}
+                        <div className="flex items-center gap-4">
+                          <Button variant="secondary" className="px-3 py-1 text-xs" onClick={() => setIsResourceModalOpen(true)}>
+                            <FileText size={14} /> Resources
+                          </Button>
+                          <Button variant="secondary" className="px-3 py-1 text-xs" onClick={() => setIsCalculatorOpen(!isCalculatorOpen)}>
+                            <CalcIcon size={14} /> Calculator
+                          </Button>
+                          <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${violationCount === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : violationCount >= 5 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>
+                            <AlertTriangle size={16} />
+                            VIOLATIONS: {violationCount}/5
+                          </div>
+                          <div className={`px-6 py-2 rounded-full border-2 border-black font-mono text-xl ${timeLeft < 10 ? 'bg-red-600 text-white animate-pulse' : ''}`}>
+                            {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                          </div>
                         </div>
-                      )}
+                      </div>
 
-                      {testQuestions[currentQuestionIndex].type === 'specific' && (
-                        <div className="w-full">
-                          <input 
-                            type={testQuestions[currentQuestionIndex].format === 'Number' ? 'number' : 'text'}
-                            placeholder={`Enter ${testQuestions[currentQuestionIndex].format} response...`}
-                            value={answers[testQuestions[currentQuestionIndex].id]?.answer || ''}
-                            onChange={(e) => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', e.target.value)}
+                    <div className="mb-10 no-select">
+                      <QuestionCanvas text={testQuestions[currentQuestionIndex].text} className="mb-8" />
+                      
+                      <div className="space-y-6">
+                        {testQuestions[currentQuestionIndex].type === 'testcase' && (
+                          <div className="space-y-8">
+                            {testQuestions[currentQuestionIndex].sub_questions?.map((sub, sIdx) => (
+                              <div key={sub.id} className="p-6 border-2 border-black rounded-2xl bg-zinc-50 space-y-4">
+                                <h4 className="font-bold text-lg">Question {sIdx + 1}: {sub.text}</h4>
+                                
+                                {sub.type === 'mcq' && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    {sub.options?.map((opt, oIdx) => (
+                                      <button
+                                        key={oIdx}
+                                        onClick={() => updateSubAnswer(testQuestions[currentQuestionIndex].id, sub.id, String.fromCharCode(97 + oIdx))}
+                                        className={`p-3 border-2 rounded-xl text-left transition-all text-sm ${answers[testQuestions[currentQuestionIndex].id]?.sub_answers?.[sub.id] === String.fromCharCode(97 + oIdx) ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black bg-white'}`}
+                                      >
+                                        <span className="font-bold mr-2 uppercase">{String.fromCharCode(97 + oIdx)}.</span> {opt}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {sub.type === 'yesno' && (
+                                  <div className="flex gap-3">
+                                    {['Yes', 'No'].map(opt => (
+                                      <button
+                                        key={opt}
+                                        onClick={() => updateSubAnswer(testQuestions[currentQuestionIndex].id, sub.id, opt)}
+                                        className={`flex-1 p-3 border-2 rounded-xl text-center font-bold transition-all text-sm ${answers[testQuestions[currentQuestionIndex].id]?.sub_answers?.[sub.id] === opt ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black bg-white'}`}
+                                      >
+                                        {opt}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {sub.type === 'specific' && (
+                                  <input 
+                                    type="text"
+                                    placeholder="Enter response..."
+                                    value={answers[testQuestions[currentQuestionIndex].id]?.sub_answers?.[sub.id] || ''}
+                                    onChange={(e) => updateSubAnswer(testQuestions[currentQuestionIndex].id, sub.id, e.target.value)}
+                                    className="w-full p-3 border-2 border-black rounded-xl focus:outline-none bg-white text-sm"
+                                  />
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {testQuestions[currentQuestionIndex].type === 'mcq' && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            {testQuestions[currentQuestionIndex].options?.map((opt, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', String.fromCharCode(97 + idx))}
+                                className={`p-4 border-2 rounded-xl text-left transition-all ${answers[testQuestions[currentQuestionIndex].id]?.answer === String.fromCharCode(97 + idx) ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black'}`}
+                              >
+                                <span className="font-bold mr-2 uppercase">{String.fromCharCode(97 + idx)}.</span> {opt}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {testQuestions[currentQuestionIndex].type === 'yesno' && (
+                          <div className="flex gap-4">
+                            {['Yes', 'No'].map(opt => (
+                              <button
+                                key={opt}
+                                onClick={() => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', opt)}
+                                className={`flex-1 p-4 border-2 rounded-xl text-center font-bold transition-all ${answers[testQuestions[currentQuestionIndex].id]?.answer === opt ? 'bg-black text-white border-black' : 'border-zinc-200 hover:border-black'}`}
+                              >
+                                {opt}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {testQuestions[currentQuestionIndex].type === 'specific' && (
+                          <div className="w-full">
+                            <input 
+                              type={testQuestions[currentQuestionIndex].format === 'Number' ? 'number' : 'text'}
+                              placeholder={`Enter ${testQuestions[currentQuestionIndex].format} response...`}
+                              value={answers[testQuestions[currentQuestionIndex].id]?.answer || ''}
+                              onChange={(e) => updateAnswer(testQuestions[currentQuestionIndex].id, 'answer', e.target.value)}
+                              className="w-full p-4 border-2 border-black rounded-xl focus:outline-none"
+                            />
+                          </div>
+                        )}
+
+                        <div className="mt-8">
+                          <label className="text-sm font-bold uppercase tracking-wider mb-2 block">Explanation / Rationale</label>
+                          <textarea
+                            rows={4}
+                            value={answers[testQuestions[currentQuestionIndex].id]?.explanation || ''}
+                            onChange={(e) => updateAnswer(testQuestions[currentQuestionIndex].id, 'explanation', e.target.value)}
+                            placeholder="Provide your reasoning for the above answer..."
                             className="w-full p-4 border-2 border-black rounded-xl focus:outline-none"
                           />
                         </div>
-                      )}
-
-                      <div className="mt-8">
-                        <label className="text-sm font-bold uppercase tracking-wider mb-2 block">Explanation / Rationale</label>
-                        <textarea
-                          rows={4}
-                          value={answers[testQuestions[currentQuestionIndex].id]?.explanation || ''}
-                          onChange={(e) => updateAnswer(testQuestions[currentQuestionIndex].id, 'explanation', e.target.value)}
-                          placeholder="Provide your reasoning for the above answer..."
-                          className="w-full p-4 border-2 border-black rounded-xl focus:outline-none"
-                        />
                       </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <Button onClick={handleNextQuestion} disabled={isSubmitting} className="w-full sm:w-auto">
+                        {isSubmitting ? 'PROCESSING...' : (currentQuestionIndex === testQuestions.length - 1 ? 'FINISH EXAM' : 'NEXT QUESTION')} <ChevronRight size={20} />
+                      </Button>
                     </div>
                   </div>
 
-                  <div className="flex justify-end">
-                    <Button onClick={handleNextQuestion} disabled={isSubmitting} className="w-full sm:w-auto">
-                      {isSubmitting ? 'PROCESSING...' : (currentQuestionIndex === testQuestions.length - 1 ? 'FINISH EXAM' : 'NEXT QUESTION')} <ChevronRight size={20} />
-                    </Button>
-                  </div>
+                  {activeResource && (
+                    <ResourceViewer 
+                      url={activeResource.url} 
+                      type={activeResource.type}
+                      onClose={() => setActiveResource(null)}
+                      search={resourceSearch}
+                      onSearchChange={setResourceSearch}
+                    />
+                  )}
                 </div>
               )}
             </motion.div>
@@ -1443,6 +1681,7 @@ export default function App() {
                   <Button variant={adminTab === 'questions' ? 'primary' : 'ghost'} onClick={() => setAdminTab('questions')}>Question Bank</Button>
                   <Button variant={adminTab === 'results' ? 'primary' : 'ghost'} onClick={() => setAdminTab('results')}>Test Results</Button>
                   <Button variant={adminTab === 'logs' ? 'primary' : 'ghost'} onClick={() => setAdminTab('logs')}>Activity Log</Button>
+                  <Button variant={adminTab === 'resources' ? 'primary' : 'ghost'} onClick={() => setAdminTab('resources')}>Resources</Button>
                   <Button variant={adminTab === 'repository' ? 'primary' : 'ghost'} onClick={() => setAdminTab('repository')}>30-Day Repository</Button>
                   <Button variant={adminTab === 'users' ? 'primary' : 'ghost'} onClick={() => setAdminTab('users')}>Users</Button>
                   <Button variant={adminTab === 'database' ? 'primary' : 'ghost'} onClick={() => setAdminTab('database')}>Database</Button>
@@ -1453,7 +1692,10 @@ export default function App() {
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
                     <h3 className="text-xl font-bold">Question Repository</h3>
-                    <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={seedQuestions}><Plus size={20} /> Seed Defaults</Button>
+                      <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 gap-4">
                     {questions.map(q => (
@@ -1471,18 +1713,17 @@ export default function App() {
                   </div>
                 </div>
               )}
-
               {adminTab === 'results' && (
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
-                    <h3 className="text-xl font-bold">Candidate Responses</h3>
+                    <h3 className="text-xl font-bold">User Responses</h3>
                     <Button variant="secondary" onClick={() => exportToExcel(adminResults, 'Test_Results')}><Download size={20} /> Export Excel</Button>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full border-collapse">
                       <thead>
                         <tr className="border-b-2 border-black text-left">
-                          <th className="p-4 uppercase text-xs font-black">Candidate</th>
+                          <th className="p-4 uppercase text-xs font-black">User</th>
                           <th className="p-4 uppercase text-xs font-black">Module</th>
                           <th className="p-4 uppercase text-xs font-black">Status</th>
                           <th className="p-4 uppercase text-xs font-black">Violations</th>
@@ -1546,13 +1787,21 @@ export default function App() {
                   </div>
                   <div className="space-y-2">
                     {adminLogs.map(log => (
-                      <div key={log.id} className="text-sm p-3 border-l-4 border-black bg-zinc-50 flex justify-between">
+                      <div key={log.id} className={`text-sm p-3 border-l-4 ${log.action === 'AI_PROCTORING_ALERT' ? 'border-red-600 bg-red-50' : 'border-black bg-zinc-50'} flex justify-between transition-all hover:bg-zinc-100`}>
                         <div>
-                          <span className="font-bold uppercase text-[10px] bg-black text-white px-1.5 py-0.5 mr-2">{log.action}</span>
-                          <span className="font-medium">{log.first_name} {log.last_name}</span>
+                          <span className={`font-bold uppercase text-[10px] ${log.action === 'AI_PROCTORING_ALERT' ? 'bg-red-600' : 'bg-black'} text-white px-1.5 py-0.5 mr-2`}>
+                            {log.action}
+                          </span>
+                          <span className="font-medium">
+                            {log.first_name ? `${log.first_name} ${log.last_name}` : 'Unknown User'}
+                          </span>
                           <span className="text-zinc-500 ml-2">— {log.details}</span>
                         </div>
-                        <span className="text-zinc-400 font-mono text-xs">{new Date(log.timestamp).toLocaleString()}</span>
+                        <span className="text-zinc-400 font-mono text-xs">
+                          {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleString() : 
+                           log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString() : 
+                           'Just now'}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -1571,12 +1820,20 @@ export default function App() {
                       <h4 className="text-sm font-black uppercase border-b-2 border-black pb-2">Recent Activity Logs</h4>
                       <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2">
                         {repositoryData.logs.map(log => (
-                          <div key={log.id} className="p-3 bg-zinc-50 rounded-xl border border-zinc-200">
+                          <div key={log.id} className={`p-3 rounded-xl border ${log.action === 'AI_PROCTORING_ALERT' ? 'bg-red-50 border-red-200' : 'bg-zinc-50 border-zinc-200'}`}>
                             <div className="flex justify-between items-start mb-1">
-                              <span className="text-[10px] font-black uppercase text-zinc-400">{new Date(log.timestamp).toLocaleDateString()}</span>
-                              <span className="text-[10px] font-black uppercase bg-black text-white px-1.5 rounded">{log.action}</span>
+                              <span className="text-[10px] font-black uppercase text-zinc-400">
+                                {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleDateString() : 
+                                 log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleDateString() : 
+                                 'Recent'}
+                              </span>
+                              <span className={`text-[10px] font-black uppercase ${log.action === 'AI_PROCTORING_ALERT' ? 'bg-red-600' : 'bg-black'} text-white px-1.5 rounded`}>
+                                {log.action}
+                              </span>
                             </div>
-                            <p className="text-xs font-bold">{log.first_name} {log.last_name}</p>
+                            <p className="text-xs font-bold">
+                              {log.first_name ? `${log.first_name} ${log.last_name}` : 'Unknown User'}
+                            </p>
                             <p className="text-[10px] text-zinc-500 truncate">{log.details}</p>
                           </div>
                         ))}
@@ -1626,6 +1883,47 @@ export default function App() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {adminTab === 'resources' && (
+                <div className="space-y-6">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xl font-bold uppercase tracking-tighter italic">Resource Repository</h3>
+                    <Button onClick={() => { setEditingResource({ type: 'PDF' }); setIsResourceModalOpen(true); }}>
+                      <Plus size={20} /> ADD RESOURCE
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {resources.length === 0 ? (
+                      <div className="col-span-full text-center py-20 border-4 border-dashed border-zinc-200 rounded-3xl text-zinc-400 font-bold uppercase tracking-widest">
+                        No resources added yet.
+                      </div>
+                    ) : (
+                      resources.map(res => (
+                        <div key={res.id} className="border-4 border-black p-6 rounded-3xl bg-white shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] hover:translate-x-1 hover:translate-y-1 hover:shadow-none transition-all">
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="bg-black text-white p-2 rounded-xl">
+                              <FileText size={24} />
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => { setEditingResource(res); setIsResourceModalOpen(true); }} className="p-2 hover:bg-zinc-100 rounded-lg transition-colors">
+                                <Edit size={18} />
+                              </button>
+                              <button onClick={() => deleteResource(res.id)} className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-colors">
+                                <Trash2 size={18} />
+                              </button>
+                            </div>
+                          </div>
+                          <h4 className="text-xl font-black mb-1 uppercase tracking-tighter leading-tight">{res.name}</h4>
+                          <p className="text-[10px] font-black uppercase text-zinc-400 mb-4">{res.type}</p>
+                          <div className="text-xs font-mono text-zinc-500 truncate mb-4 bg-zinc-50 p-2 rounded-lg border border-zinc-200">
+                            {res.type === 'Link' ? res.url : 'File Uploaded'}
+                          </div>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               )}
@@ -1680,11 +1978,12 @@ export default function App() {
                           <select 
                             className="border-2 border-black p-2 rounded-lg"
                             value={editingQuestion?.type || 'mcq'}
-                            onChange={e => setEditingQuestion({...editingQuestion, type: e.target.value as any})}
+                            onChange={e => setEditingQuestion({...editingQuestion, type: e.target.value as any, sub_questions: e.target.value === 'testcase' ? [] : undefined})}
                           >
                             <option value="mcq">Multiple Choice</option>
                             <option value="yesno">Yes / No</option>
                             <option value="specific">Specific Answer</option>
+                            <option value="testcase">Test Case (Scenario)</option>
                           </select>
                         </div>
                         <div className="flex flex-col gap-1">
@@ -1697,8 +1996,8 @@ export default function App() {
                       </div>
 
                       <div className="flex flex-col gap-1">
-                        <label className="text-xs font-bold uppercase">Question Text</label>
-                        <textarea className="border-2 border-black p-2 rounded-lg" rows={3} value={editingQuestion?.text || ''} onChange={e => setEditingQuestion({...editingQuestion, text: e.target.value})} required />
+                        <label className="text-xs font-bold uppercase">{editingQuestion?.type === 'testcase' ? 'Test Case Scenario' : 'Question Text'}</label>
+                        <textarea className="border-2 border-black p-2 rounded-lg font-mono text-sm whitespace-pre-wrap" rows={editingQuestion?.type === 'testcase' ? 6 : 3} value={editingQuestion?.text || ''} onChange={e => setEditingQuestion({...editingQuestion, text: e.target.value})} required />
                       </div>
 
                       {editingQuestion?.type === 'mcq' && (
@@ -1716,6 +2015,140 @@ export default function App() {
                         </div>
                       )}
 
+                      {editingQuestion?.type === 'testcase' && (
+                        <div className="space-y-4 border-2 border-black p-4 rounded-xl bg-zinc-50">
+                          <div className="flex justify-between items-center">
+                            <h4 className="font-black uppercase text-sm">Sub-Questions (1-5)</h4>
+                            <Button 
+                              variant="secondary" 
+                              className="py-1 px-3 text-xs" 
+                              onClick={() => {
+                                if ((editingQuestion?.sub_questions?.length || 0) < 5) {
+                                  const newSub = { id: Math.random().toString(36).substr(2, 9), text: '', type: 'mcq' as any, options: ['', '', '', ''], correct_answer: 'a' };
+                                  setEditingQuestion({...editingQuestion, sub_questions: [...(editingQuestion?.sub_questions || []), newSub]});
+                                }
+                              }}
+                              disabled={(editingQuestion?.sub_questions?.length || 0) >= 5}
+                            >
+                              <Plus size={14} /> Add Sub-Question
+                            </Button>
+                          </div>
+                          
+                          {editingQuestion?.sub_questions?.map((sub: any, sIdx: number) => (
+                            <div key={sub.id} className="p-4 border-2 border-black rounded-lg bg-white space-y-3 relative">
+                              <button 
+                                type="button"
+                                onClick={() => {
+                                  const newSubs = [...(editingQuestion.sub_questions || [])];
+                                  newSubs.splice(sIdx, 1);
+                                  setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                }}
+                                className="absolute top-2 right-2 text-red-500 hover:text-red-700"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                              
+                              <div className="grid grid-cols-2 gap-2">
+                                <div className="flex flex-col gap-1">
+                                  <label className="text-[10px] font-bold uppercase">Type</label>
+                                  <select 
+                                    className="border border-black p-1 rounded text-xs"
+                                    value={sub.type}
+                                    onChange={e => {
+                                      const newSubs = [...(editingQuestion.sub_questions || [])];
+                                      newSubs[sIdx].type = e.target.value as any;
+                                      if (e.target.value === 'mcq') newSubs[sIdx].correct_answer = 'a';
+                                      if (e.target.value === 'yesno') newSubs[sIdx].correct_answer = 'Yes';
+                                      setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                    }}
+                                  >
+                                    <option value="mcq">MCQ</option>
+                                    <option value="yesno">Yes/No</option>
+                                    <option value="specific">Specific</option>
+                                  </select>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  <label className="text-[10px] font-bold uppercase">Correct Answer</label>
+                                  {sub.type === 'mcq' ? (
+                                    <select 
+                                      className="border border-black p-1 rounded text-xs"
+                                      value={sub.correct_answer}
+                                      onChange={e => {
+                                        const newSubs = [...(editingQuestion.sub_questions || [])];
+                                        newSubs[sIdx].correct_answer = e.target.value;
+                                        setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                      }}
+                                    >
+                                      <option value="a">A</option>
+                                      <option value="b">B</option>
+                                      <option value="c">C</option>
+                                      <option value="d">D</option>
+                                    </select>
+                                  ) : sub.type === 'yesno' ? (
+                                    <select 
+                                      className="border border-black p-1 rounded text-xs"
+                                      value={sub.correct_answer}
+                                      onChange={e => {
+                                        const newSubs = [...(editingQuestion.sub_questions || [])];
+                                        newSubs[sIdx].correct_answer = e.target.value;
+                                        setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                      }}
+                                    >
+                                      <option value="Yes">Yes</option>
+                                      <option value="No">No</option>
+                                    </select>
+                                  ) : (
+                                    <input 
+                                      className="border border-black p-1 rounded text-xs"
+                                      value={sub.correct_answer}
+                                      onChange={e => {
+                                        const newSubs = [...(editingQuestion.sub_questions || [])];
+                                        newSubs[sIdx].correct_answer = e.target.value;
+                                        setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                      }}
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                              
+                              <div className="flex flex-col gap-1">
+                                <label className="text-[10px] font-bold uppercase">Question Text</label>
+                                <textarea 
+                                  className="border border-black p-1 rounded text-xs" 
+                                  rows={2} 
+                                  value={sub.text} 
+                                  onChange={e => {
+                                    const newSubs = [...(editingQuestion.sub_questions || [])];
+                                    newSubs[sIdx].text = e.target.value;
+                                    setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                  }}
+                                />
+                              </div>
+                              
+                              {sub.type === 'mcq' && (
+                                <div className="grid grid-cols-2 gap-1">
+                                  {['a', 'b', 'c', 'd'].map((opt, i) => (
+                                    <input 
+                                      key={opt}
+                                      placeholder={`Option ${opt.toUpperCase()}`}
+                                      className="border border-black p-1 rounded text-[10px]"
+                                      value={sub.options?.[i] || ''}
+                                      onChange={e => {
+                                        const newSubs = [...(editingQuestion.sub_questions || [])];
+                                        const newOpts = [...(newSubs[sIdx].options || ['', '', '', ''])];
+                                        newOpts[i] = e.target.value;
+                                        newSubs[sIdx].options = newOpts;
+                                        setEditingQuestion({...editingQuestion, sub_questions: newSubs});
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {editingQuestion?.type === 'specific' && (
                         <div className="flex flex-col gap-1">
                           <label className="text-xs font-bold uppercase">Expected Format</label>
@@ -1726,12 +2159,36 @@ export default function App() {
                         </div>
                       )}
 
-                      <div className="grid grid-cols-1 gap-4">
-                        <div className="flex flex-col gap-1">
-                          <label className="text-xs font-bold uppercase">Correct Answer</label>
-                          <input className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.correct_answer || ''} onChange={e => setEditingQuestion({...editingQuestion, correct_answer: e.target.value})} required />
+                      {editingQuestion?.type !== 'testcase' && (
+                        <div className="grid grid-cols-1 gap-4">
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-bold uppercase">Correct Answer</label>
+                            {editingQuestion?.type === 'mcq' ? (
+                              <select 
+                                className="border-2 border-black p-2 rounded-lg"
+                                value={editingQuestion?.correct_answer || 'a'}
+                                onChange={e => setEditingQuestion({...editingQuestion, correct_answer: e.target.value})}
+                              >
+                                <option value="a">Option A</option>
+                                <option value="b">Option B</option>
+                                <option value="c">Option C</option>
+                                <option value="d">Option D</option>
+                              </select>
+                            ) : editingQuestion?.type === 'yesno' ? (
+                              <select 
+                                className="border-2 border-black p-2 rounded-lg"
+                                value={editingQuestion?.correct_answer || 'Yes'}
+                                onChange={e => setEditingQuestion({...editingQuestion, correct_answer: e.target.value})}
+                              >
+                                <option value="Yes">Yes</option>
+                                <option value="No">No</option>
+                              </select>
+                            ) : (
+                              <input className="border-2 border-black p-2 rounded-lg" value={editingQuestion?.correct_answer || ''} onChange={e => setEditingQuestion({...editingQuestion, correct_answer: e.target.value})} required />
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
 
                       <div className="flex flex-col gap-1">
                         <label className="text-xs font-bold uppercase">Master Rationale (for AI Scoring)</label>
@@ -1773,8 +2230,22 @@ export default function App() {
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
                             <div className="bg-zinc-50 p-4 rounded-xl">
                               <p className="text-[10px] font-black uppercase text-zinc-400 mb-2">User Answer</p>
-                              <p className="font-medium">{resp.answer}</p>
-                              <p className="text-xs mt-2 text-zinc-500">Correct: <span className="font-bold text-black">{resp.q_correct_answer}</span></p>
+                              {resp.q_type === 'testcase' ? (
+                                <div className="space-y-3">
+                                  {resp.q_sub_questions?.map((sub: any, sIdx: number) => (
+                                    <div key={sub.id} className="text-sm border-b border-zinc-200 last:border-0 pb-2 last:pb-0">
+                                      <p className="font-bold">Sub Q{sIdx + 1}: {sub.text}</p>
+                                      <p>Answer: <span className="font-medium">{resp.sub_answers?.[sub.id] || '(No Answer)'}</span></p>
+                                      <p className="text-xs text-zinc-500">Correct: <span className="font-bold text-black">{sub.correct_answer}</span></p>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <>
+                                  <p className="font-medium">{resp.answer}</p>
+                                  <p className="text-xs mt-2 text-zinc-500">Correct: <span className="font-bold text-black">{resp.q_correct_answer}</span></p>
+                                </>
+                              )}
                             </div>
                             <div className="bg-zinc-50 p-4 rounded-xl">
                               <p className="text-[10px] font-black uppercase text-zinc-400 mb-2">User Explanation</p>
@@ -1789,11 +2260,21 @@ export default function App() {
 
                           <div className="grid grid-cols-2 gap-4">
                             <div className="flex flex-col gap-1">
-                              <label className="text-[10px] font-black uppercase">Answer Score (0 or 1)</label>
+                              <label className="text-[10px] font-black uppercase">
+                                Answer Score (0 to {resp.q_type === 'testcase' ? resp.q_sub_questions?.length : 1})
+                              </label>
                               <input 
-                                type="number" min="0" max="1" 
+                                type="number" min="0" max={resp.q_type === 'testcase' ? resp.q_sub_questions?.length : 1} 
                                 className="border-2 border-black p-2 rounded-lg text-black" 
-                                value={resp.admin_score ?? (resp.answer === resp.q_correct_answer ? 1 : 0) ?? ''} 
+                                value={resp.admin_score ?? (
+                                  resp.q_type === 'testcase' 
+                                    ? resp.q_sub_questions?.reduce((acc: number, sub: any) => {
+                                        const subAns = resp.sub_answers?.[sub.id];
+                                        if (subAns && sub.correct_answer && subAns.toLowerCase().trim() === sub.correct_answer.toLowerCase().trim()) return acc + 1;
+                                        return acc;
+                                      }, 0)
+                                    : (resp.answer === resp.q_correct_answer ? 1 : 0)
+                                ) ?? ''} 
                                 onChange={e => {
                                   const newResps = [...reviewResponses];
                                   const val = e.target.value === '' ? undefined : parseInt(e.target.value);
@@ -1831,7 +2312,126 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+        {/* Resource Modal */}
+        {isResourceModalOpen && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white border-4 border-black p-8 rounded-3xl w-full max-w-xl max-h-[90vh] overflow-y-auto"
+            >
+              <h2 className="text-3xl font-black mb-6 uppercase italic tracking-tighter">
+                {isAdmin ? (editingResource?.id ? 'Edit Resource' : 'Add Resource') : 'Allowed Resources'}
+              </h2>
+              
+              {isAdmin ? (
+                <form onSubmit={saveResource} className="space-y-4">
+                  <Input 
+                    label="Resource Name" 
+                    value={editingResource?.name || ''} 
+                    onChange={(v: string) => setEditingResource({ ...editingResource, name: v })} 
+                    required 
+                  />
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-semibold uppercase tracking-wider">Type</label>
+                    <select 
+                      value={editingResource?.type || 'PDF'}
+                      onChange={(e) => {
+                        setEditingResource({ ...editingResource, type: e.target.value });
+                        setResourceFile(null);
+                      }}
+                      className="border-2 border-black p-3 rounded-lg focus:outline-none"
+                    >
+                      <option value="PDF">PDF Document</option>
+                      <option value="Image">Image</option>
+                      <option value="Link">Web Link</option>
+                    </select>
+                  </div>
+
+                  {editingResource?.type !== 'Link' && (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-sm font-semibold uppercase tracking-wider">Upload File ({editingResource?.type})</label>
+                      <input 
+                        type="file" 
+                        accept={editingResource?.type === 'PDF' ? '.pdf' : 'image/*'}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            if (file.size > 5 * 1024 * 1024) {
+                              showAlert("File Too Large", "Maximum file size is 5MB.");
+                              e.target.value = '';
+                              return;
+                            }
+                            setResourceFile(file);
+                          }
+                        }}
+                        className="border-2 border-black p-3 rounded-lg focus:outline-none"
+                      />
+                      <p className="text-[10px] text-zinc-400 uppercase font-bold mt-1">Max size: 5MB. Files are stored in Firebase Storage.</p>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-1">
+                    <Input 
+                      label={editingResource?.type === 'Link' ? "Web Link URL" : "Or Paste URL"} 
+                      value={editingResource?.url || ''} 
+                      onChange={(v: string) => setEditingResource({ ...editingResource, url: v })} 
+                      required={editingResource?.type === 'Link' || (!editingResource?.id && !resourceFile)}
+                      helperText={editingResource?.type === 'Link' ? "Enter a direct link to the web resource." : "If you have a direct link (e.g. Google Drive, Dropbox), paste it here instead of uploading."}
+                    />
+                    {editingResource?.url && !resourceFile && editingResource?.type !== 'Link' && (
+                      <p className="text-[10px] text-green-600 uppercase font-bold mt-1">Current URL will be used unless you upload a new file.</p>
+                    )}
+                  </div>
+
+                  <div className="flex gap-4 pt-4">
+                    <Button type="submit" className="flex-1" disabled={savingResource}>
+                      {savingResource ? 'SAVING...' : 'SAVE RESOURCE'}
+                    </Button>
+                    <Button variant="secondary" onClick={() => setIsResourceModalOpen(false)} disabled={savingResource}>CANCEL</Button>
+                  </div>
+                </form>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-zinc-500 mb-6">Select a resource to open it alongside your test questions.</p>
+                  <div className="grid grid-cols-1 gap-3">
+                    {resources.length === 0 ? (
+                      <div className="text-center py-10 text-zinc-400 italic">No resources available for this test.</div>
+                    ) : (
+                      resources.map(res => (
+                        <button
+                          key={res.id}
+                          onClick={() => {
+                            setActiveResource(res);
+                            setIsResourceModalOpen(false);
+                          }}
+                          className="flex items-center gap-4 p-4 border-2 border-black rounded-2xl hover:bg-zinc-50 transition-all text-left"
+                        >
+                          <div className="bg-black text-white p-2 rounded-lg">
+                            <FileText size={20} />
+                          </div>
+                          <div>
+                            <p className="font-bold">{res.name}</p>
+                            <p className="text-[10px] font-black uppercase text-zinc-400">{res.type}</p>
+                          </div>
+                          <ChevronRight className="ml-auto text-zinc-400" size={20} />
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <Button variant="secondary" onClick={() => setIsResourceModalOpen(false)} className="w-full mt-6">CLOSE</Button>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
       </main>
+
+      <AnimatePresence>
+        {isCalculatorOpen && (
+          <Calculator onClose={() => setIsCalculatorOpen(false)} />
+        )}
+      </AnimatePresence>
 
       <Dialog 
         isOpen={dialog.isOpen}

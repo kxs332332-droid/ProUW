@@ -1,32 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Camera, AlertTriangle } from 'lucide-react';
+import { Camera, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { analyzeProctoring } from '../services/aiService';
-import { db } from '../firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
-import { handleFirestoreError } from '../App';
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
 
 interface ProctoringWidgetProps {
   userId: string;
   onWarning: (reason: string) => void;
+  onCheck?: (details: string) => void;
   onCameraError: (error: string) => void;
   onReady?: () => void;
 }
 
-export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWarning, onCameraError, onReady }) => {
+export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWarning, onCheck, onCameraError, onReady }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isAnalyzingRef = useRef(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
 
   useEffect(() => {
     let activeStream: MediaStream | null = null;
@@ -43,7 +33,6 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
       }
 
       try {
-        // Try with ideal constraints first
         const stream = await navigator.mediaDevices.getUserMedia({ 
           video: { 
             width: { ideal: 640 },
@@ -52,9 +41,11 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
           },
           audio: false
         }).catch(async (e) => {
-          // Fallback to basic video if ideal fails
-          console.warn("Ideal constraints failed, falling back to basic video", e);
-          return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          if (e.name === 'OverconstrainedError' || e.name === 'ConstraintNotSatisfiedError') {
+            console.warn("Ideal constraints failed, falling back to basic video", e);
+            return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          }
+          throw e;
         });
 
         activeStream = stream;
@@ -71,9 +62,11 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
         console.error("Camera access error:", err);
         let msg = "Camera access is mandatory for this exam.";
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          msg += " Permission was denied. To fix this:\n1. Click the camera icon in your browser's address bar.\n2. Select 'Always allow' or 'Allow'.\n3. Refresh this page.\n\nIf you don't see an icon, check your browser settings for 'Privacy and Security' > 'Site Settings' > 'Camera'.";
+          msg += " Permission was denied. \n\nTo fix this:\n1. Click the camera icon in your browser's address bar.\n2. Select 'Always allow' or 'Allow'.\n3. Click 'RETRY CAMERA ACCESS' below.\n\nIf you don't see an icon, check your browser settings for 'Privacy and Security' > 'Site Settings' > 'Camera'.";
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           msg += " No camera was found on your device. Please connect a camera and try again.";
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+          msg += " Your camera is already in use by another application. Please close other apps using the camera and retry.";
         } else if (err.name === 'OverconstrainedError') {
           msg += " Your camera does not support the required resolution. Please try a different camera.";
         } else {
@@ -90,7 +83,7 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
         activeStream.getTracks().forEach(track => track.stop());
       }
     };
-  }, []); // Only run once on mount
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -102,52 +95,59 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
         const context = canvas.getContext('2d');
 
         if (context && video.videoWidth > 0) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const imageData = canvas.toDataURL('image/jpeg', 0.5);
+          try {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = canvas.toDataURL('image/jpeg', 0.5);
 
-          const result = await analyzeProctoring(imageData);
-          console.log("AI Proctoring Result:", result);
-          if (result.malpracticeDetected) {
-            console.warn("Malpractice detected:", result.reason);
-            onWarning(result.reason);
-            
-            // Log to Firestore
-            try {
-              await addDoc(collection(db, 'activity_logs'), {
-                user_id: userId,
-                action: 'AI_PROCTORING_ALERT',
-                details: result.reason,
-                timestamp: serverTimestamp()
-              });
-            } catch (e) {
-              handleFirestoreError(e, OperationType.CREATE, 'activity_logs');
+            const result = await analyzeProctoring(imageData);
+            console.log("AI Proctoring Result:", result);
+            setLastCheckTime(new Date());
+
+            if (result.malpracticeDetected) {
+              console.warn("Malpractice detected:", result.reason);
+              onWarning(result.reason);
+            } else if (onCheck) {
+              onCheck("No malpractice detected. Confidence: " + (result.confidence || "N/A"));
             }
+          } catch (error) {
+            console.error("Proctoring analysis cycle error:", error);
           }
         }
         isAnalyzingRef.current = false;
         setIsAnalyzing(false);
       }
-    }, 7000); // Every 7 seconds for frequent analysis
+    }, 10000); // Every 10 seconds to balance security and API usage
 
     return () => clearInterval(interval);
-  }, [userId, onWarning]);
+  }, [userId, onWarning, onCheck]);
 
   return (
     <motion.div
       drag
       dragMomentum={false}
-      dragConstraints={{ left: 0, right: window.innerWidth - 192, top: 0, bottom: window.innerHeight - 144 }}
-      className="fixed top-20 right-4 w-48 h-36 bg-black border border-white/20 rounded-lg overflow-hidden shadow-2xl z-[100] cursor-move"
-      initial={{ opacity: 0, scale: 0.8 }}
+      className="fixed top-20 right-4 w-48 h-40 bg-black border-2 border-white/20 rounded-xl overflow-hidden shadow-2xl z-[10000] cursor-move"
+      initial={{ opacity: 0, scale: 0.8, x: 0, y: 0 }}
       animate={{ opacity: 1, scale: 1 }}
     >
-      <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-      <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/50 px-2 py-0.5 rounded text-[10px] text-white">
-        <Camera size={10} className={isAnalyzing ? "text-red-500 animate-pulse" : "text-green-500"} />
-        <span>AI PROCTORING</span>
+      <video ref={videoRef} autoPlay muted playsInline className="w-full h-32 object-cover" />
+      
+      <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full text-[9px] text-white font-bold border border-white/10">
+        <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-red-500 animate-pulse" : "bg-green-500"}`} />
+        <span className="tracking-widest uppercase">AI Proctoring</span>
       </div>
+
+      <div className="bg-zinc-900 p-2 flex flex-col justify-center h-8 border-t border-white/10">
+        <div className="flex items-center justify-between text-[8px] text-zinc-400 font-mono uppercase tracking-tighter">
+          <div className="flex items-center gap-1">
+            <ShieldCheck size={8} className="text-emerald-500" />
+            <span>Active</span>
+          </div>
+          <span>{lastCheckTime ? lastCheckTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Initializing...'}</span>
+        </div>
+      </div>
+      
       <canvas ref={canvasRef} className="hidden" />
     </motion.div>
   );

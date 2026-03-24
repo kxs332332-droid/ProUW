@@ -72,12 +72,28 @@
         "details": { "type": "string" }
       },
       "required": ["user_id", "action", "timestamp"]
+    },
+    "resources": {
+      "title": "Resource",
+      "description": "PDF documents uploaded by admin",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "url"]
     }
   },
   "firestore": {
     "users/{userId}": {
       "schema": "users",
       "description": "User profiles"
+    },
+    "resources/{resourceId}": {
+      "schema": "resources",
+      "description": "Admin uploaded resources"
     },
     "questions/{questionId}": {
       "schema": "questions",

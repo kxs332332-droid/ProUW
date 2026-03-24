@@ -7,9 +7,17 @@ export interface User {
   role: 'user' | 'admin';
 }
 
+export interface SubQuestion {
+  id: string;
+  text: string;
+  type: 'mcq' | 'yesno' | 'specific';
+  options: string[] | null;
+  correct_answer: string;
+}
+
 export interface Question {
   id: string;
-  type: 'mcq' | 'yesno' | 'specific';
+  type: 'mcq' | 'yesno' | 'specific' | 'testcase';
   text: string;
   options: string[] | null;
   correct_answer: string;
@@ -17,6 +25,7 @@ export interface Question {
   format: 'Text' | 'Number' | null;
   module: number;
   time_limit: number;
+  sub_questions?: SubQuestion[];
 }
 
 export interface TestSession {
@@ -50,6 +59,8 @@ export interface Response {
   q_correct_answer?: string;
   master_rationale?: string;
   q_type?: string;
+  q_sub_questions?: SubQuestion[];
+  sub_answers?: { [subId: string]: string };
 }
 
 export interface ActivityLog {
@@ -61,4 +72,12 @@ export interface ActivityLog {
   first_name?: string;
   last_name?: string;
   employee_id?: string;
+}
+
+export interface Resource {
+  id: string;
+  name: string;
+  url: string;
+  type: string;
+  timestamp: any;
 }

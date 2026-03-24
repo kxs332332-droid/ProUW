@@ -54,14 +54,29 @@ export async function scoreExplanation(userExplanation: string, masterRationale:
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Compare the user's explanation with the master rationale for a mortgage underwriting question. 
-      Master Rationale: ${masterRationale}
-      User Explanation: ${userExplanation}
-      
-      Provide a similarity score from 0 to 100 based on how well the user captures the core concepts and technical accuracy.
-      Respond with a JSON object: { "score": number, "feedback": string }`,
+      contents: [
+        {
+          parts: [
+            {
+              text: `Compare the user's explanation with the master rationale for a mortgage underwriting question. 
+              Master Rationale: ${masterRationale}
+              User Explanation: ${userExplanation}
+              
+              Provide a similarity score from 0 to 100 based on how well the user captures the core concepts and technical accuracy.`
+            }
+          ]
+        }
+      ],
       config: {
         responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            score: { type: Type.NUMBER },
+            feedback: { type: Type.STRING }
+          },
+          required: ["score", "feedback"]
+        }
       }
     });
 

@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /resources/{allPaths=**} {
+      // Allow anyone authenticated to read resources
+      allow read: if request.auth != null;
+      
+      // Allow only admins to write/delete resources
+      allow write: if request.auth != null && 
+        (request.auth.token.email == "kxs332332@gmail.com" ||
+         request.auth.token.email == "admin@pro-uw.com" ||
+         firestore.get(/databases/ai-studio-5df691fe-f4e5-4df4-a66c-135420df6dcc/documents/users/$(request.auth.uid)).data.role == 'admin') &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        (request.resource.contentType.matches('application/pdf') || request.resource.contentType.matches('image/.*'));
+    }
+  }
+}

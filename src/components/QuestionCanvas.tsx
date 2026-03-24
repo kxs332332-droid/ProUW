@@ -21,23 +21,31 @@ export const QuestionCanvas: React.FC<QuestionCanvasProps> = ({ text, className 
     const padding = 20;
     
     // Measure text to determine height
-    ctx.font = `${fontSize}px Inter, sans-serif`;
-    const words = text.split(' ');
-    let line = '';
-    const lines = [];
+    ctx.font = `${fontSize}px 'JetBrains Mono', 'Courier New', monospace`;
+    const paragraphs = text.split('\n');
+    const lines: string[] = [];
     
-    for (let n = 0; n < words.length; n++) {
-      const testLine = line + words[n] + ' ';
-      const metrics = ctx.measureText(testLine);
-      const testWidth = metrics.width;
-      if (testWidth > width - padding * 2 && n > 0) {
-        lines.push(line);
-        line = words[n] + ' ';
-      } else {
-        line = testLine;
+    paragraphs.forEach(paragraph => {
+      if (paragraph.trim() === '') {
+        lines.push('');
+        return;
       }
-    }
-    lines.push(line);
+      const words = paragraph.split(' ');
+      let line = '';
+      
+      for (let n = 0; n < words.length; n++) {
+        const testLine = line + words[n] + ' ';
+        const metrics = ctx.measureText(testLine);
+        const testWidth = metrics.width;
+        if (testWidth > width - padding * 2 && n > 0) {
+          lines.push(line);
+          line = words[n] + ' ';
+        } else {
+          line = testLine;
+        }
+      }
+      lines.push(line);
+    });
 
     canvas.width = width;
     canvas.height = lines.length * (fontSize * 1.5) + padding * 2;
@@ -48,7 +56,7 @@ export const QuestionCanvas: React.FC<QuestionCanvasProps> = ({ text, className 
 
     // Draw text
     ctx.fillStyle = 'black';
-    ctx.font = `${fontSize}px Inter, sans-serif`;
+    ctx.font = `${fontSize}px 'JetBrains Mono', 'Courier New', monospace`;
     ctx.textBaseline = 'top';
 
     lines.forEach((l, i) => {

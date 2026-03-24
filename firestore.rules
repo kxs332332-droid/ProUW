@@ -9,16 +9,19 @@ service cloud.firestore {
     // Fields: first_name, last_name, employee_id, user_id, role
     //
     // Collection: questions
-    // Fields: type, text, options, correct_answer, master_rationale, format, module, time_limit
+    // Fields: type, text, options, correct_answer, master_rationale, format, module, time_limit, sub_questions
     //
     // Collection: test_sessions
     // Fields: user_id, module, total_questions, start_time, end_time, status, total_score, total_explanation_score, violation_count
     //
     // Collection: test_sessions/{sessionId}/responses
-    // Fields: session_id, question_id, answer, explanation, ai_explanation_score, admin_score, admin_explanation_score
+    // Fields: session_id, question_id, answer, sub_answers, explanation, ai_explanation_score, admin_score, admin_explanation_score
     //
     // Collection: activity_logs
     // Fields: user_id, action, timestamp, details
+    //
+    // Collection: resources
+    // Fields: name, url, type, timestamp
     //
     // ===============================================================
 
@@ -33,87 +36,105 @@ service cloud.firestore {
     
     function isAdmin() {
       return isAuthenticated() && 
-        ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
-         (request.auth.token.email == "kxs332332@gmail.com")); // Removed email_verified check for easier initial admin access
+        (request.auth.token.email == "kxs332332@gmail.com" ||
+         request.auth.token.email == "admin@pro-uw.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
     }
 
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Domain Validators
     function isValidUser(data) {
-      return data.keys().hasAll(['first_name', 'last_name', 'employee_id', 'user_id', 'role']) &&
+      return hasOnlyAllowedFields(['first_name', 'last_name', 'employee_id', 'user_id', 'role']) &&
              data.first_name is string && data.first_name.size() > 0 && data.first_name.size() < 100 &&
              data.last_name is string && data.last_name.size() > 0 && data.last_name.size() < 100 &&
-             data.employee_id is string && data.employee_id.size() > 0 && data.employee_id.size() < 50 &&
-             data.user_id is string && data.user_id.size() > 0 && data.user_id.size() < 50 &&
+             data.employee_id is string && data.employee_id.size() > 0 &&
+             data.user_id is string && data.user_id.size() > 0 &&
              data.role in ['user', 'admin'];
     }
 
     function isValidQuestion(data) {
-      return data.keys().hasAll(['type', 'text', 'correct_answer', 'module']) &&
-             data.type in ['mcq', 'yesno', 'specific'] &&
-             data.text is string && data.text.size() > 0 && data.text.size() < 2000 &&
-             data.correct_answer is string && data.correct_answer.size() > 0 && data.correct_answer.size() < 500 &&
-             data.module is int && data.module >= 1 && data.module <= 5;
+      return hasOnlyAllowedFields(['type', 'text', 'options', 'correct_answer', 'master_rationale', 'format', 'module', 'time_limit', 'sub_questions']) &&
+             data.type in ['mcq', 'yesno', 'specific', 'testcase'] &&
+             data.text is string && data.text.size() > 0 &&
+             data.module is number &&
+             data.time_limit is number;
     }
 
     function isValidSession(data) {
-      return data.keys().hasAll(['user_id', 'module', 'status']) &&
+      return hasOnlyAllowedFields(['user_id', 'module', 'total_questions', 'start_time', 'end_time', 'status', 'total_score', 'total_explanation_score', 'violation_count']) &&
              data.user_id is string &&
-             data.module is int &&
-             data.status in ['in_progress', 'completed', 'published', 'suspended', 'denied'] &&
-             (!('total_score' in data) || data.total_score is number) &&
-             (!('total_explanation_score' in data) || data.total_explanation_score is number);
+             data.module is number &&
+             data.status in ['in_progress', 'suspended', 'denied', 'published', 'completed'];
     }
 
     function isValidResponse(data) {
-      return data.keys().hasAll(['session_id', 'question_id', 'answer']) &&
+      return hasOnlyAllowedFields(['session_id', 'question_id', 'answer', 'sub_answers', 'explanation', 'ai_explanation_score', 'admin_score', 'admin_explanation_score']) &&
              data.session_id is string &&
-             data.question_id is string &&
-             data.answer is string && data.answer.size() < 5000 &&
-             (!('admin_score' in data) || data.admin_score is number || data.admin_score == null) &&
-             (!('admin_explanation_score' in data) || data.admin_explanation_score is number || data.admin_explanation_score == null);
+             data.question_id is string;
     }
 
     function isValidLog(data) {
-      return data.keys().hasAll(['user_id', 'action', 'timestamp']) &&
+      return hasOnlyAllowedFields(['user_id', 'action', 'timestamp', 'details']) &&
              data.user_id is string &&
              data.action is string &&
              data.timestamp is timestamp;
     }
 
-    // Rules
+    function isValidResource(data) {
+      return hasOnlyAllowedFields(['name', 'url', 'type', 'timestamp']) &&
+             data.name is string && data.name.size() > 0 &&
+             data.url is string && data.url.size() > 0 &&
+             data.type is string &&
+             (data.timestamp is timestamp || data.timestamp is string || data.timestamp == null);
+    }
+
+    // Match Rules
     match /users/{userId} {
-      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
       allow update: if isAuthenticated() && (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role && isValidUser(request.resource.data)));
+      allow delete: if isAdmin();
+    }
+
+    match /resources/{resourceId} {
+      allow get, list: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidResource(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     match /questions/{questionId} {
       allow read: if isAuthenticated();
-      allow create: if isAdmin() && isValidQuestion(request.resource.data);
-      allow update: if isAdmin() && isValidQuestion(request.resource.data);
-      allow delete: if isAdmin();
+      allow write: if isAdmin() && isValidQuestion(request.resource.data);
     }
 
     match /test_sessions/{sessionId} {
-      allow read: if isAuthenticated() && (isAdmin() || resource.data.user_id == request.auth.uid);
-      allow create: if isAuthenticated() && isValidSession(request.resource.data) && request.resource.data.user_id == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidSession(request.resource.data) && (request.resource.data.user_id == request.auth.uid || isAdmin());
       allow update: if isAuthenticated() && (
         isAdmin() || 
-        (resource.data.user_id == request.auth.uid && isValidSession(request.resource.data) && request.resource.data.user_id == resource.data.user_id)
+        (resource.data.user_id == request.auth.uid && isValidSession(request.resource.data))
       );
       allow delete: if isAdmin();
 
       match /responses/{responseId} {
-        allow read: if isAuthenticated() && (isAdmin() || get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid);
-        allow create: if isAuthenticated() && isValidResponse(request.resource.data) && get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid;
-        allow update: if isAdmin() && isValidResponse(request.resource.data);
+        allow read: if isAuthenticated();
+        allow create, update: if isAuthenticated() && isValidResponse(request.resource.data) && (get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid || isAdmin());
         allow delete: if isAdmin();
       }
     }
 
     match /activity_logs/{logId} {
       allow read: if isAdmin();
-      allow create: if isAuthenticated() && isValidLog(request.resource.data) && request.resource.data.user_id == request.auth.uid;
-      allow update, delete: if isAdmin();
+      allow create: if isAuthenticated() && isValidLog(request.resource.data);
+      allow delete: if isAdmin();
     }
   }
 }
