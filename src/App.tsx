@@ -223,9 +223,8 @@ export default function App() {
   }, [currentUser]);
 
   const handleProctoringCheck = useCallback((details: string) => {
-    // Routine checks are no longer logged to the activity log to reduce noise
+    // Routine checks are no longer logged to the activity log or console to reduce noise
     // Only malpractice detections (warnings) are logged
-    console.log("AI Proctoring Check:", details);
   }, []);
 
   const handleCameraError = useCallback((error: string) => {

@@ -17,6 +17,7 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
   const isAnalyzingRef = useRef(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
+  const [status, setStatus] = useState<'secure' | 'warning'>('secure');
 
   useEffect(() => {
     let activeStream: MediaStream | null = null;
@@ -108,21 +109,25 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
             }
             const avgBrightness = totalBrightness / (pixelData.length / 4);
             
-            if (avgBrightness < 5) { // Threshold for "black" or "obscured"
-              console.warn("Client-side black screen detection triggered.");
+            if (avgBrightness < 15) { // Increased threshold for better detection
+              console.warn("Client-side black screen detection triggered. Brightness:", avgBrightness);
+              setStatus('warning');
               onWarning("Camera is obscured or black screen detected.");
               setLastCheckTime(new Date());
             } else {
               const imageData = canvas.toDataURL('image/jpeg', 0.5);
               const result = await analyzeProctoring(imageData);
-              console.log("AI Proctoring Result:", result);
               setLastCheckTime(new Date());
 
               if (result.malpracticeDetected) {
                 console.warn("Malpractice detected:", result.reason);
+                setStatus('warning');
                 onWarning(result.reason);
-              } else if (onCheck) {
-                onCheck("No malpractice detected. Confidence: " + (result.confidence || "N/A"));
+              } else {
+                setStatus('secure');
+                if (onCheck) {
+                  onCheck("No malpractice detected. Confidence: " + (result.confidence || "N/A"));
+                }
               }
             }
           } catch (error) {
@@ -141,22 +146,31 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
     <motion.div
       drag
       dragMomentum={false}
-      className="fixed top-20 right-4 w-48 h-40 bg-black border-2 border-white/20 rounded-xl overflow-hidden shadow-2xl z-[10000] cursor-move"
+      className={`fixed top-20 right-4 w-48 h-40 bg-black border-2 ${status === 'warning' ? 'border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.4)]' : 'border-white/20'} rounded-xl overflow-hidden shadow-2xl z-[10000] cursor-move transition-colors duration-500`}
       initial={{ opacity: 0, scale: 0.8, x: 0, y: 0 }}
       animate={{ opacity: 1, scale: 1 }}
     >
       <video ref={videoRef} autoPlay muted playsInline className="w-full h-32 object-cover" />
       
       <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full text-[9px] text-white font-bold border border-white/10">
-        <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-red-500 animate-pulse" : "bg-green-500"}`} />
+        <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-blue-500 animate-pulse" : (status === 'warning' ? "bg-red-500" : "bg-green-500")}`} />
         <span className="tracking-widest uppercase">AI Proctoring</span>
       </div>
 
       <div className="bg-zinc-900 p-2 flex flex-col justify-center h-8 border-t border-white/10">
         <div className="flex items-center justify-between text-[8px] text-zinc-400 font-mono uppercase tracking-tighter">
           <div className="flex items-center gap-1">
-            <ShieldCheck size={8} className="text-emerald-500" />
-            <span>Active</span>
+            {status === 'warning' ? (
+              <>
+                <AlertTriangle size={8} className="text-red-500" />
+                <span className="text-red-500">Warning</span>
+              </>
+            ) : (
+              <>
+                <ShieldCheck size={8} className="text-emerald-500" />
+                <span>Secure</span>
+              </>
+            )}
           </div>
           <span>{lastCheckTime ? lastCheckTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Initializing...'}</span>
         </div>

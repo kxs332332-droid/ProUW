@@ -95,37 +95,9 @@ export const ResourceViewer: React.FC<ResourceViewerProps> = ({ url, type, onClo
 
   return (
     <div className="flex flex-col h-full border-l-4 border-black bg-white shadow-[-10px_0_30px_rgba(0,0,0,0.1)]">
-      <div className="p-4 border-b-2 border-black flex flex-col gap-4 bg-zinc-50">
-        <div className="flex justify-between items-center">
-          <h3 className="font-black uppercase italic tracking-tighter whitespace-nowrap">Resource Viewer</h3>
-          <button onClick={onClose} className="p-2 hover:bg-zinc-200 rounded-full transition-colors text-zinc-600"><X size={24} /></button>
-        </div>
-        
-        {isPdf && (
-          <form onSubmit={handleGo} className="flex flex-wrap gap-2 items-center">
-            <div className="relative flex-1 min-w-[200px]">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
-              <input 
-                type="text" 
-                placeholder="Find words..." 
-                value={localSearch}
-                onChange={(e) => setLocalSearch(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 border-2 border-black rounded-lg text-sm focus:outline-none"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold uppercase">Page</span>
-              <input 
-                type="text" 
-                placeholder="1" 
-                value={localPage}
-                onChange={(e) => setLocalPage(e.target.value)}
-                className="w-16 px-2 py-2 border-2 border-black rounded-lg text-sm text-center focus:outline-none"
-              />
-              <button type="submit" className="px-4 py-2 bg-black text-white rounded-lg text-xs font-bold hover:bg-zinc-800 transition-colors shadow-[4px_4px_0px_0px_rgba(0,0,0,0.3)] active:translate-y-1 active:shadow-none">GO</button>
-            </div>
-          </form>
-        )}
+      <div className="p-4 border-b-2 border-black flex justify-between items-center bg-zinc-50">
+        <h3 className="font-black uppercase italic tracking-tighter whitespace-nowrap">Resource Viewer</h3>
+        <button onClick={onClose} className="p-2 hover:bg-zinc-200 rounded-full transition-colors text-zinc-600"><X size={24} /></button>
       </div>
       <div className="flex-1 relative overflow-hidden bg-zinc-100 flex flex-col">
         <div className="flex-1 relative">
@@ -133,10 +105,10 @@ export const ResourceViewer: React.FC<ResourceViewerProps> = ({ url, type, onClo
             <>
               {/* Protective overlay to block interaction with the floating toolbar area in some browsers */}
               {/* This prevents users from clicking zoom/pop-out buttons that might appear at the top */}
-              <div className="absolute top-0 left-0 right-0 h-12 z-10 bg-transparent pointer-events-none sm:pointer-events-auto" title="Interaction with PDF toolbar is disabled" />
+              <div className="absolute top-0 left-0 right-0 h-16 z-10 bg-transparent pointer-events-auto" title="Interaction with PDF toolbar is disabled" />
               
               <iframe 
-                key={`${url}-${search}-${page}`} // Re-render iframe ONLY when search or page is SUBMITTED
+                key={`${url}`} 
                 src={getEmbedUrl(url)} 
                 className="w-full h-full border-none"
                 title="Resource PDF"
