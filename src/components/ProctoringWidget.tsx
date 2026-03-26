@@ -99,17 +99,31 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const imageData = canvas.toDataURL('image/jpeg', 0.5);
+            
+            // Client-side black screen detection as a fallback for robustness
+            const pixelData = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let totalBrightness = 0;
+            for (let i = 0; i < pixelData.length; i += 4) {
+              totalBrightness += (pixelData[i] + pixelData[i+1] + pixelData[i+2]) / 3;
+            }
+            const avgBrightness = totalBrightness / (pixelData.length / 4);
+            
+            if (avgBrightness < 5) { // Threshold for "black" or "obscured"
+              console.warn("Client-side black screen detection triggered.");
+              onWarning("Camera is obscured or black screen detected.");
+              setLastCheckTime(new Date());
+            } else {
+              const imageData = canvas.toDataURL('image/jpeg', 0.5);
+              const result = await analyzeProctoring(imageData);
+              console.log("AI Proctoring Result:", result);
+              setLastCheckTime(new Date());
 
-            const result = await analyzeProctoring(imageData);
-            console.log("AI Proctoring Result:", result);
-            setLastCheckTime(new Date());
-
-            if (result.malpracticeDetected) {
-              console.warn("Malpractice detected:", result.reason);
-              onWarning(result.reason);
-            } else if (onCheck) {
-              onCheck("No malpractice detected. Confidence: " + (result.confidence || "N/A"));
+              if (result.malpracticeDetected) {
+                console.warn("Malpractice detected:", result.reason);
+                onWarning(result.reason);
+              } else if (onCheck) {
+                onCheck("No malpractice detected. Confidence: " + (result.confidence || "N/A"));
+              }
             }
           } catch (error) {
             console.error("Proctoring analysis cycle error:", error);

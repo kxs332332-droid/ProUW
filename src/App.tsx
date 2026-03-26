@@ -223,9 +223,10 @@ export default function App() {
   }, [currentUser]);
 
   const handleProctoringCheck = useCallback((details: string) => {
-    // Log routine checks silently to the activity log for audit purposes
-    logActivity('AI_PROCTORING_CHECK', details);
-  }, [currentUser]);
+    // Routine checks are no longer logged to the activity log to reduce noise
+    // Only malpractice detections (warnings) are logged
+    console.log("AI Proctoring Check:", details);
+  }, []);
 
   const handleCameraError = useCallback((error: string) => {
     setCameraError(error);
@@ -277,6 +278,7 @@ export default function App() {
   const [editingResource, setEditingResource] = useState<Partial<Resource> | null>(null);
   const [activeResource, setActiveResource] = useState<Resource | null>(null);
   const [resourceSearch, setResourceSearch] = useState('');
+  const [resourcePage, setResourcePage] = useState('');
   const [resourceFile, setResourceFile] = useState<File | null>(null);
   const [savingResource, setSavingResource] = useState(false);
 
@@ -418,6 +420,10 @@ export default function App() {
 
     const handleBlur = () => {
       if (view === 'test' && activeSession) {
+        // If the blur is caused by clicking into an iframe (like the resource viewer), ignore it
+        if (document.activeElement?.tagName === 'IFRAME') {
+          return;
+        }
         setIsBlurred(true);
         handleViolation("Switched tabs or lost window focus.");
       }
@@ -436,11 +442,36 @@ export default function App() {
       }
     };
 
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const anchor = target.closest('a');
+      if (anchor && view === 'test') {
+        const href = anchor.getAttribute('href');
+        const targetAttr = anchor.getAttribute('target');
+        
+        // Prevent any link that tries to open in a new tab or navigate away during test
+        if (targetAttr === '_blank' || (href && !href.startsWith('#') && !href.startsWith('javascript:'))) {
+          e.preventDefault();
+          showAlert("Action Blocked", "You are not allowed to navigate away or open new windows during the test.");
+          handleViolation(`Attempted to navigate away via link: ${href}`);
+        }
+      }
+    };
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (view === 'test' && activeSession) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     window.addEventListener('blur', handleBlur);
     window.addEventListener('focus', handleFocus);
     window.addEventListener('contextmenu', handleContextMenu);
     window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('click', handleClick, true);
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
@@ -448,6 +479,8 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('contextmenu', handleContextMenu);
       window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('click', handleClick, true);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, [view, activeSession, handleProctoringWarning]);
 
@@ -1053,24 +1086,6 @@ export default function App() {
     });
   };
 
-  const seedQuestions = async () => {
-    showConfirm("Seed Questions", "This will add the default set of questions to the database. Are you sure?", async () => {
-      try {
-        const batch = writeBatch(db);
-        questionsData.forEach(q => {
-          const qRef = doc(collection(db, 'questions'));
-          batch.set(qRef, q);
-        });
-        await batch.commit();
-        fetchAdminData();
-        showAlert("Success", "Questions seeded successfully!");
-      } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'questions');
-        showAlert("Error", "Failed to seed questions.");
-      }
-    });
-  };
-
   const downloadBackup = async () => {
     try {
       const collections = ['users', 'questions', 'test_sessions', 'activity_logs'];
@@ -1567,6 +1582,8 @@ export default function App() {
                       onClose={() => setActiveResource(null)}
                       search={resourceSearch}
                       onSearchChange={setResourceSearch}
+                      page={resourcePage}
+                      onPageChange={setResourcePage}
                     />
                   )}
                 </div>
@@ -1693,7 +1710,6 @@ export default function App() {
                   <div className="flex justify-between items-center">
                     <h3 className="text-xl font-bold">Question Repository</h3>
                     <div className="flex gap-2">
-                      <Button variant="secondary" onClick={seedQuestions}><Plus size={20} /> Seed Defaults</Button>
                       <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
                     </div>
                   </div>

@@ -9,7 +9,16 @@ export async function analyzeProctoring(imageBuffer: string) {
       contents: [
         {
           parts: [
-            { text: "Analyze this webcam frame for malpractice during an exam. Look for: multiple people, looking away frequently, using a phone, or talking. If you see anything suspicious, set malpracticeDetected to true and provide a clear reason." },
+            { text: `Analyze this webcam frame for exam malpractice. 
+            CRITICAL CHECKS:
+            1. BLACK SCREEN / OBSCURED: If the image is completely black, extremely dark, or clearly obscured (e.g., hand over camera), set malpracticeDetected: true with reason 'Camera is obscured or black screen'.
+            2. NO PERSON: If no human face is clearly visible in the frame, set malpracticeDetected: true with reason 'No candidate visible in frame'.
+            3. MULTIPLE PEOPLE: If more than one person is visible in the frame, set malpracticeDetected: true with reason 'Multiple people detected'.
+            4. PHONE/DEVICES: If a smartphone, tablet, or any other unauthorized electronic device is visible, set malpracticeDetected: true with reason 'Electronic device detected'.
+            5. LOOKING AWAY: If the candidate is consistently looking away from the screen (e.g., looking down at a lap, or far to the side) rather than at the monitor, set malpracticeDetected: true with reason 'Candidate consistently looking away'.
+            6. TALKING: If the candidate appears to be talking or communicating with someone off-camera, set malpracticeDetected: true with reason 'Candidate appears to be talking'.
+
+            If the candidate is clearly visible, alone, and focused on the screen, set malpracticeDetected to false.` },
             {
               inlineData: {
                 mimeType: "image/jpeg",
@@ -20,7 +29,7 @@ export async function analyzeProctoring(imageBuffer: string) {
         },
       ],
       config: {
-        systemInstruction: "You are a strict exam proctor. Your goal is to detect any sign of cheating or malpractice from a webcam feed. Be precise and only flag clear violations. If multiple people are present, or the candidate is using a phone, or talking, or looking away from the screen consistently, mark it as malpractice.",
+        systemInstruction: "You are a highly vigilant exam proctor. Your goal is to detect any sign of cheating or malpractice from a webcam feed. Be extremely precise. Flag black screens, missing candidates, multiple people, and unauthorized devices immediately. If the frame is dark or obscured, it is a violation.",
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -35,15 +44,15 @@ export async function analyzeProctoring(imageBuffer: string) {
     });
 
     const text = response.text;
-    if (!text) return { malpracticeDetected: false, reason: "No response from AI" };
+    if (!text) return { malpracticeDetected: false, reason: "No response from AI", confidence: 0 };
     return JSON.parse(text);
   } catch (error: any) {
     if (error?.message?.includes("429") || error?.message?.includes("RESOURCE_EXHAUSTED")) {
       console.warn("AI Proctoring: Rate limit exceeded (429). Skipping analysis.");
-      return { malpracticeDetected: false, reason: "AI Service Busy (Rate Limit)" };
+      return { malpracticeDetected: false, reason: "AI Service Busy (Rate Limit)", confidence: 0 };
     }
     console.error("AI Proctoring Error:", error);
-    return { malpracticeDetected: false, reason: "Error in analysis" };
+    return { malpracticeDetected: false, reason: "Error in analysis", confidence: 0 };
   }
 }
 

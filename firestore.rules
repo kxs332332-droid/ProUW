@@ -50,6 +50,10 @@ service cloud.firestore {
       return request.resource.data.keys().hasAll(fields);
     }
 
+    function isRecent(ts) {
+      return ts is timestamp && ts > request.time - duration.value(5, 'm') && ts < request.time + duration.value(5, 'm');
+    }
+
     // Domain Validators
     function isValidUser(data) {
       return hasOnlyAllowedFields(['first_name', 'last_name', 'employee_id', 'user_id', 'role']) &&
@@ -85,7 +89,8 @@ service cloud.firestore {
       return hasOnlyAllowedFields(['user_id', 'action', 'timestamp', 'details']) &&
              data.user_id is string &&
              data.action is string &&
-             data.timestamp is timestamp;
+             data.details is string &&
+             (data.timestamp is timestamp || data.timestamp == null);
     }
 
     function isValidResource(data) {
@@ -98,14 +103,14 @@ service cloud.firestore {
 
     // Match Rules
     match /users/{userId} {
-      allow read: if isAuthenticated();
+      allow read: if isOwner(userId) || isAdmin();
       allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
       allow update: if isAuthenticated() && (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role && isValidUser(request.resource.data)));
       allow delete: if isAdmin();
     }
 
     match /resources/{resourceId} {
-      allow get, list: if isAuthenticated();
+      allow read: if isAuthenticated();
       allow create, update: if isAdmin() && isValidResource(request.resource.data);
       allow delete: if isAdmin();
     }
@@ -116,7 +121,7 @@ service cloud.firestore {
     }
 
     match /test_sessions/{sessionId} {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.user_id == request.auth.uid);
       allow create: if isAuthenticated() && isValidSession(request.resource.data) && (request.resource.data.user_id == request.auth.uid || isAdmin());
       allow update: if isAuthenticated() && (
         isAdmin() || 
@@ -125,7 +130,7 @@ service cloud.firestore {
       allow delete: if isAdmin();
 
       match /responses/{responseId} {
-        allow read: if isAuthenticated();
+        allow read: if isAdmin() || (isAuthenticated() && get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid);
         allow create, update: if isAuthenticated() && isValidResponse(request.resource.data) && (get(/databases/$(database)/documents/test_sessions/$(sessionId)).data.user_id == request.auth.uid || isAdmin());
         allow delete: if isAdmin();
       }
