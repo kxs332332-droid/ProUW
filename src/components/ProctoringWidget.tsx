@@ -123,6 +123,9 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
                 console.warn("Malpractice detected:", result.reason);
                 setStatus('warning');
                 onWarning(result.reason);
+                if (onCheck) {
+                  onCheck(`Warning: ${result.reason}`);
+                }
               } else {
                 setStatus('secure');
                 if (onCheck) {
@@ -130,8 +133,10 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
                 }
               }
             }
-          } catch (error) {
+          } catch (error: any) {
             console.error("Proctoring analysis cycle error:", error);
+            setStatus('warning');
+            onWarning(`Analysis Error: ${error.message || "Unknown error"}`);
           }
         }
         isAnalyzingRef.current = false;

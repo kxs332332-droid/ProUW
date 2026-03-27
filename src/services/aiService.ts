@@ -1,15 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const getApiKey = () => {
+  const env = (import.meta as any).env;
+  return process.env.GEMINI_API_KEY || (env && env.VITE_GEMINI_API_KEY) || "";
+};
 
 export async function analyzeProctoring(imageBuffer: string) {
-  const apiKey = process.env.GEMINI_API_KEY || "";
+  const apiKey = getApiKey();
   if (!apiKey) {
-    console.error("AI Proctoring: GEMINI_API_KEY is missing!");
+    console.error("AI Proctoring: GEMINI_API_KEY is missing! Please ensure it is set in environment variables.");
     return { malpracticeDetected: true, reason: "Proctoring Service Unavailable (Missing API Key)", confidence: 0 };
   }
 
   try {
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: [
@@ -63,18 +67,22 @@ export async function analyzeProctoring(imageBuffer: string) {
     }
     console.error("AI Proctoring Critical Error:", error);
     // If it's a foundational error (like API key invalid), we should probably flag it
-    if (error?.message?.includes("API key not valid") || error?.message?.includes("not found")) {
-      return { malpracticeDetected: true, reason: "Proctoring Service Error (API Key Issue)", confidence: 0 };
-    }
-    return { malpracticeDetected: false, reason: "Error in analysis", confidence: 0 };
+    return { malpracticeDetected: true, reason: `Proctoring Service Error: ${error.message || "Unknown error"}`, confidence: 0 };
   }
 }
 
 export async function scoreExplanation(userExplanation: string, masterRationale: string) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.error("AI Scoring: GEMINI_API_KEY is missing!");
+    return { score: 0, feedback: "AI Scoring Service Unavailable (Missing API Key)" };
+  }
+
   if (!userExplanation || userExplanation.trim().length < 5) {
     return { score: 0, feedback: "Explanation too short or missing." };
   }
   try {
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: [
