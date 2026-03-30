@@ -12,6 +12,10 @@ export async function analyzeProctoring(imageBuffer: string) {
     return { malpracticeDetected: true, reason: "Proctoring Service Unavailable (Missing API Key)", confidence: 0 };
   }
 
+  // Debug log to verify which key is being used (obfuscated)
+  const keyDebug = `${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}`;
+  console.log(`AI Proctoring: Using API Key [${keyDebug}]`);
+
   try {
     const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
@@ -65,9 +69,19 @@ export async function analyzeProctoring(imageBuffer: string) {
       console.warn("AI Proctoring: Rate limit exceeded (429). Skipping analysis.");
       return { malpracticeDetected: false, reason: "AI Service Busy (Rate Limit)", confidence: 0 };
     }
+    
     console.error("AI Proctoring Critical Error:", error);
-    // If it's a foundational error (like API key invalid), we should probably flag it
-    return { malpracticeDetected: true, reason: `Proctoring Service Error: ${error.message || "Unknown error"}`, confidence: 0 };
+
+    let friendlyReason = "Proctoring Service Error";
+    if (error?.message?.includes("API_KEY_SERVICE_BLOCKED")) {
+      friendlyReason = "AI Service Blocked: Please enable 'Generative Language API' for your API Key in Google Cloud Console or use a dedicated Gemini API Key.";
+    } else if (error?.message?.includes("API key not valid")) {
+      friendlyReason = "Invalid API Key: Please check your GEMINI_API_KEY on Render.";
+    } else {
+      friendlyReason = `Proctoring Service Error: ${error.message || "Unknown error"}`;
+    }
+
+    return { malpracticeDetected: true, reason: friendlyReason, confidence: 0 };
   }
 }
 

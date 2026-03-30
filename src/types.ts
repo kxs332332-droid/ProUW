@@ -17,7 +17,7 @@ export interface SubQuestion {
 
 export interface Question {
   id: string;
-  type: 'mcq' | 'yesno' | 'specific' | 'testcase';
+  type: 'mcq' | 'yesno' | 'specific' | 'testcase' | 'pdf-assessment';
   text: string;
   options: string[] | null;
   correct_answer: string;
@@ -26,6 +26,7 @@ export interface Question {
   module: number;
   time_limit: number;
   sub_questions?: SubQuestion[];
+  pdf_url?: string;
 }
 
 export interface TestSession {

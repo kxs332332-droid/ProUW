@@ -65,11 +65,17 @@ service cloud.firestore {
     }
 
     function isValidQuestion(data) {
-      return hasOnlyAllowedFields(['type', 'text', 'options', 'correct_answer', 'master_rationale', 'format', 'module', 'time_limit', 'sub_questions']) &&
-             data.type in ['mcq', 'yesno', 'specific', 'testcase'] &&
+      return hasOnlyAllowedFields(['type', 'text', 'options', 'correct_answer', 'master_rationale', 'format', 'module', 'time_limit', 'sub_questions', 'pdf_url']) &&
+             data.type in ['mcq', 'yesno', 'specific', 'testcase', 'pdf-assessment'] &&
              data.text is string && data.text.size() > 0 &&
-             data.module is number &&
-             data.time_limit is number;
+             (!('module' in data) || data.module is number) &&
+             (!('time_limit' in data) || data.time_limit is number) &&
+             (!('correct_answer' in data) || data.correct_answer is string) &&
+             (!('master_rationale' in data) || data.master_rationale is string) &&
+             (!('pdf_url' in data) || data.pdf_url is string) &&
+             (!('options' in data) || data.options is list || data.options == null) &&
+             (!('format' in data) || data.format is string || data.format == null) &&
+             (!('sub_questions' in data) || data.sub_questions is list);
     }
 
     function isValidSession(data) {
@@ -117,7 +123,8 @@ service cloud.firestore {
 
     match /questions/{questionId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin() && isValidQuestion(request.resource.data);
+      allow create, update: if isAdmin() && isValidQuestion(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     match /test_sessions/{sessionId} {

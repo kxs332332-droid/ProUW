@@ -182,6 +182,26 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const logActivity = useCallback(async (action: string, details: string) => {
+    if (!currentUser) {
+      console.warn(`logActivity skipped: No currentUser for action ${action}`);
+      return;
+    }
+    try {
+      console.log(`Logging activity: ${action}`, details);
+      await addDoc(collection(db, 'activity_logs'), {
+        user_id: currentUser.id,
+        action,
+        details,
+        timestamp: serverTimestamp()
+      });
+      console.log(`Activity logged successfully: ${action}`);
+    } catch (error) {
+      console.error(`Failed to log activity: ${action}`, error);
+      handleFirestoreError(error, OperationType.CREATE, 'activity_logs');
+    }
+  }, [currentUser]);
+
   const handleViolation = useCallback(async (reason: string) => {
     if (!activeSession || !currentUser) return;
     
@@ -211,16 +231,14 @@ export default function App() {
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `test_sessions/${activeSession}`);
     }
-  }, [activeSession, currentUser]);
+  }, [activeSession, currentUser, logActivity]);
 
   const handleProctoringWarning = useCallback((reason: string) => {
-    setProctoringWarnings(prev => {
-      const newCount = prev + 1;
-      console.warn(`AI Proctoring Alert: ${reason}`);
-      logActivity('AI_PROCTORING_ALERT', reason);
-      return newCount;
-    });
-  }, [currentUser]);
+    console.log(`handleProctoringWarning triggered: ${reason}`);
+    setProctoringWarnings(prev => prev + 1);
+    console.warn(`AI Proctoring Alert: ${reason}`);
+    logActivity('AI_PROCTORING_ALERT', reason);
+  }, [currentUser, logActivity]);
 
   const handleProctoringCheck = useCallback((details: string) => {
     // Routine checks are no longer logged to the activity log or console to reduce noise
@@ -307,6 +325,16 @@ export default function App() {
       return () => unsub();
     }
   }, [currentUser, fetchResources]);
+
+  const sanitizeFirestoreData = (data: any) => {
+    const sanitized = { ...data };
+    Object.keys(sanitized).forEach(key => {
+      if (sanitized[key] === undefined) {
+        delete sanitized[key];
+      }
+    });
+    return sanitized;
+  };
 
   const saveResource = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -481,21 +509,7 @@ export default function App() {
       document.removeEventListener('click', handleClick, true);
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [view, activeSession, handleProctoringWarning]);
-
-  const logActivity = async (action: string, details: string) => {
-    if (!currentUser) return;
-    try {
-      await addDoc(collection(db, 'activity_logs'), {
-        user_id: currentUser.id,
-        action,
-        details,
-        timestamp: serverTimestamp()
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'activity_logs');
-    }
-  };
+  }, [view, activeSession, handleProctoringWarning, handleViolation]);
 
   const fetchUserSessions = useCallback(async () => {
     if (!currentUser) return;
@@ -906,6 +920,24 @@ export default function App() {
   }, [adminTab]);
 
   useEffect(() => {
+    if (view === 'admin' && adminTab === 'logs') {
+      const q = query(collection(db, 'activity_logs'), orderBy('timestamp', 'desc'), limit(100));
+      const unsubscribe = onSnapshot(q, async (snapshot) => {
+        const logs = await Promise.all(snapshot.docs.map(async (logDoc) => {
+          const data = logDoc.data();
+          const userDoc = await getDoc(doc(db, 'users', data.user_id));
+          const userData = userDoc.exists() ? userDoc.data() : {};
+          return { id: logDoc.id, ...data, ...userData } as any;
+        }));
+        setAdminLogs(logs);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'activity_logs');
+      });
+      return () => unsubscribe();
+    }
+  }, [view, adminTab]);
+
+  useEffect(() => {
     if (view === 'admin') fetchAdminData();
   }, [view, adminTab, fetchAdminData]);
 
@@ -921,20 +953,65 @@ export default function App() {
   };
 
   const [isQuestionModalOpen, setIsQuestionModalOpen] = useState(false);
+  const [questionPdfFile, setQuestionPdfFile] = useState<File | null>(null);
+  const [isSavingQuestion, setIsSavingQuestion] = useState(false);
 
   const saveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSavingQuestion(true);
     try {
+      let pdfUrl = editingQuestion?.pdf_url || '';
+
+      if (editingQuestion?.type === 'pdf-assessment') {
+        if (questionPdfFile) {
+          try {
+            const sanitizedName = questionPdfFile.name.replace(/[^a-zA-Z0-9.]/g, '_');
+            const fileRef = ref(storage, `questions/${Date.now()}_${sanitizedName}`);
+            const uploadResult = await uploadBytes(fileRef, questionPdfFile);
+            pdfUrl = await getDownloadURL(uploadResult.ref);
+          } catch (uploadError) {
+            console.error("PDF upload failed:", uploadError);
+            alert("Failed to upload PDF. Please check your connection or try providing a URL instead.");
+            setIsSavingQuestion(false);
+            return;
+          }
+        } else if (!pdfUrl) {
+          alert("Please upload a PDF or provide a PDF URL.");
+          setIsSavingQuestion(false);
+          return;
+        }
+
+        // Auto-convert Google Drive links to preview format for embedding
+        if (pdfUrl.includes('drive.google.com')) {
+          const fileIdMatch = pdfUrl.match(/\/d\/([a-zA-Z0-9_-]+)/) || pdfUrl.match(/id=([a-zA-Z0-9_-]+)/);
+          if (fileIdMatch && fileIdMatch[1]) {
+            pdfUrl = `https://drive.google.com/file/d/${fileIdMatch[1]}/preview`;
+          }
+        }
+      }
+
+      const questionData: any = sanitizeFirestoreData({
+        ...editingQuestion,
+        pdf_url: pdfUrl,
+        module: editingQuestion?.module ?? 1,
+        time_limit: editingQuestion?.time_limit ?? 60,
+        master_rationale: editingQuestion?.master_rationale || 'N/A',
+        correct_answer: editingQuestion?.type === 'pdf-assessment' ? 'N/A' : (editingQuestion?.correct_answer || '')
+      });
+
       if (editingQuestion?.id) {
-        const { id, ...data } = editingQuestion;
+        const { id, ...data } = questionData;
         await updateDoc(doc(db, 'questions', id), data);
       } else {
-        await addDoc(collection(db, 'questions'), editingQuestion);
+        await addDoc(collection(db, 'questions'), questionData);
       }
       setIsQuestionModalOpen(false);
       setEditingQuestion(null);
+      setQuestionPdfFile(null);
+      setIsSavingQuestion(false);
       fetchAdminData();
     } catch (error) {
+      setIsSavingQuestion(false);
       handleFirestoreError(error, editingQuestion?.id ? OperationType.UPDATE : OperationType.CREATE, editingQuestion?.id ? `questions/${editingQuestion.id}` : 'questions');
     }
   };
@@ -1456,6 +1533,10 @@ export default function App() {
                             <AlertTriangle size={16} />
                             VIOLATIONS: {violationCount}/5
                           </div>
+                          <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${proctoringWarnings === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : 'bg-red-100 text-red-700 border-red-200'}`}>
+                            <Eye size={16} />
+                            AI ALERTS: {proctoringWarnings}
+                          </div>
                           <div className={`px-6 py-2 rounded-full border-2 border-black font-mono text-xl ${timeLeft < 10 ? 'bg-red-600 text-white animate-pulse' : ''}`}>
                             {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
                           </div>
@@ -1514,6 +1595,19 @@ export default function App() {
                           </div>
                         )}
 
+                        {testQuestions[currentQuestionIndex].type === 'pdf-assessment' && testQuestions[currentQuestionIndex].pdf_url && (
+                          <div className="w-full h-[600px] border-4 border-black rounded-2xl overflow-hidden relative bg-zinc-100 mb-6">
+                            <div className="absolute top-0 left-0 right-0 h-16 z-10 bg-transparent pointer-events-auto" title="Interaction with PDF toolbar is disabled" />
+                            <iframe 
+                              src={`${testQuestions[currentQuestionIndex].pdf_url}#toolbar=0&navpanes=0&scrollbar=1&statusbar=0&messages=0&view=FitH`}
+                              className="w-full h-full border-none"
+                              title="Assessment PDF"
+                              sandbox="allow-scripts allow-same-origin allow-forms"
+                              allow="autoplay; fullscreen"
+                            />
+                          </div>
+                        )}
+
                         {testQuestions[currentQuestionIndex].type === 'mcq' && (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {testQuestions[currentQuestionIndex].options?.map((opt, idx) => (
@@ -1555,12 +1649,14 @@ export default function App() {
                         )}
 
                         <div className="mt-8">
-                          <label className="text-sm font-bold uppercase tracking-wider mb-2 block">Explanation / Rationale</label>
+                          <label className="text-sm font-bold uppercase tracking-wider mb-2 block">
+                            {testQuestions[currentQuestionIndex].type === 'pdf-assessment' ? 'Your Assessment / Explanation' : 'Explanation / Rationale'}
+                          </label>
                           <textarea
-                            rows={4}
+                            rows={testQuestions[currentQuestionIndex].type === 'pdf-assessment' ? 8 : 4}
                             value={answers[testQuestions[currentQuestionIndex].id]?.explanation || ''}
                             onChange={(e) => updateAnswer(testQuestions[currentQuestionIndex].id, 'explanation', e.target.value)}
-                            placeholder="Provide your reasoning for the above answer..."
+                            placeholder={testQuestions[currentQuestionIndex].type === 'pdf-assessment' ? "Provide your detailed assessment based on the PDF above..." : "Provide your reasoning for the above answer..."}
                             className="w-full p-4 border-2 border-black rounded-xl focus:outline-none"
                           />
                         </div>
@@ -1709,7 +1805,7 @@ export default function App() {
                   <div className="flex justify-between items-center">
                     <h3 className="text-xl font-bold">Question Repository</h3>
                     <div className="flex gap-2">
-                      <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
+                      <Button onClick={() => { setEditingQuestion({ type: 'mcq', module: 1 }); setQuestionPdfFile(null); setIsQuestionModalOpen(true); }}><Plus size={20} /> Add Question</Button>
                     </div>
                   </div>
                   <div className="grid grid-cols-1 gap-4">
@@ -1720,7 +1816,7 @@ export default function App() {
                           <p className="font-medium mt-1">{q.text}</p>
                         </div>
                         <div className="flex gap-2">
-                          <Button variant="ghost" className="p-2" onClick={() => { setEditingQuestion(q); setIsQuestionModalOpen(true); }}><ChevronRight size={18} /></Button>
+                          <Button variant="ghost" className="p-2" onClick={() => { setEditingQuestion(q); setQuestionPdfFile(null); setIsQuestionModalOpen(true); }}><ChevronRight size={18} /></Button>
                           <Button variant="ghost" className="p-2 text-red-600" onClick={() => deleteQuestion(q.id)}><Trash2 size={18} /></Button>
                         </div>
                       </div>
@@ -1999,6 +2095,7 @@ export default function App() {
                             <option value="yesno">Yes / No</option>
                             <option value="specific">Specific Answer</option>
                             <option value="testcase">Test Case (Scenario)</option>
+                            <option value="pdf-assessment">PDF-Assessment</option>
                           </select>
                         </div>
                         <div className="flex flex-col gap-1">
@@ -2164,6 +2261,40 @@ export default function App() {
                         </div>
                       )}
 
+                      {editingQuestion?.type === 'pdf-assessment' && (
+                        <div className="space-y-4 border-2 border-black p-4 rounded-xl bg-zinc-50">
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-bold uppercase">Upload Question PDF</label>
+                            <input 
+                              type="file" 
+                              accept=".pdf" 
+                              className="border-2 border-black p-2 rounded-lg bg-white" 
+                              onChange={e => setQuestionPdfFile(e.target.files?.[0] || null)}
+                            />
+                          </div>
+                          
+                          <div className="flex items-center gap-4 py-1">
+                            <div className="h-px bg-zinc-300 flex-1"></div>
+                            <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">OR</span>
+                            <div className="h-px bg-zinc-300 flex-1"></div>
+                          </div>
+
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-bold uppercase">PDF URL</label>
+                            <input 
+                              type="url" 
+                              className="border-2 border-black p-2 rounded-lg bg-white" 
+                              placeholder="https://example.com/question.pdf"
+                              value={editingQuestion?.pdf_url || ''}
+                              onChange={e => setEditingQuestion({...editingQuestion, pdf_url: e.target.value})}
+                            />
+                            {editingQuestion?.pdf_url && !questionPdfFile && (
+                              <p className="text-[10px] text-zinc-500 mt-1 font-mono truncate">Current: {editingQuestion.pdf_url}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {editingQuestion?.type === 'specific' && (
                         <div className="flex flex-col gap-1">
                           <label className="text-xs font-bold uppercase">Expected Format</label>
@@ -2174,7 +2305,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {editingQuestion?.type !== 'testcase' && (
+                      {editingQuestion?.type !== 'testcase' && editingQuestion?.type !== 'pdf-assessment' && (
                         <div className="grid grid-cols-1 gap-4">
                           <div className="flex flex-col gap-1">
                             <label className="text-xs font-bold uppercase">Correct Answer</label>
@@ -2211,8 +2342,10 @@ export default function App() {
                       </div>
 
                       <div className="flex gap-2 pt-4">
-                        <Button type="submit" className="flex-1">SAVE QUESTION</Button>
-                        <Button variant="secondary" onClick={() => setIsQuestionModalOpen(false)}>CANCEL</Button>
+                        <Button type="submit" className="flex-1" disabled={isSavingQuestion}>
+                          {isSavingQuestion ? 'SAVING...' : 'SAVE QUESTION'}
+                        </Button>
+                        <Button variant="secondary" onClick={() => setIsQuestionModalOpen(false)} disabled={isSavingQuestion}>CANCEL</Button>
                       </div>
                     </form>
                   </motion.div>
