@@ -174,13 +174,6 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
     >
       <video ref={videoRef} autoPlay muted playsInline className="w-full h-32 object-cover" />
       
-      {/* Debug Key Overlay */}
-      {debugKey && (
-        <div className={`absolute top-10 left-2 ${isKeyMissing ? 'bg-red-600 animate-pulse' : 'bg-black/80'} text-white text-[8px] px-1.5 py-0.5 rounded font-mono z-50 border border-white/20`}>
-          Key: {debugKey}
-        </div>
-      )}
-
       <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full text-[9px] text-white font-bold border border-white/10">
         <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-blue-500 animate-pulse" : "bg-green-500"}`} />
         <span className="tracking-widest uppercase">AI Proctoring</span>

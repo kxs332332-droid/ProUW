@@ -98,6 +98,8 @@ async function startServer() {
         const envKeys = [
           'VITE_GEMINI_API_KEY',
           'GEMINI_API_KEY',
+          'VITE_GEMINI_APIKEY',
+          'GEMINI_APIKEY',
           'Vite_Gemini_API_Key',
           'Gemini_API_Key',
           'VITE_Gemini_API_Key'

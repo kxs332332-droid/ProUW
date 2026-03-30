@@ -737,10 +737,21 @@ export default function App() {
             },
             async () => {
               // Cancel existing session and proceed to start a new one
-              await deleteDoc(doc(db, 'test_sessions', session.id));
-              logActivity('TEST_CANCELLED', `Cancelled existing session ${session.id} to start new one`);
-              // Restart the process
-              proceedToTest();
+              try {
+                await deleteDoc(doc(db, 'test_sessions', session.id));
+                logActivity('TEST_CANCELLED', `Cancelled existing session ${session.id} to start new one`);
+                
+                // Instead of calling proceedToTest again (which might find the same doc due to latency)
+                // We manually trigger the "start new" logic
+                setIsStarting(false); // Reset starting state so we can start fresh
+                setActiveSession(null);
+                setViolationCount(0);
+                // The user is already on home view, they can click "Start Test" again
+                // Or we can automatically trigger the next step
+                setTimeout(() => proceedToTest(), 500);
+              } catch (error) {
+                handleFirestoreError(error, OperationType.DELETE, 'test_sessions');
+              }
             }
           );
           return;
@@ -1533,7 +1544,7 @@ export default function App() {
           )}
 
           {view === 'test' && (
-            <motion.div key="test" className={activeResource ? "py-0" : "py-10"}>
+            <motion.div key="test" className={`${activeResource ? "py-0" : "py-10"} no-select`}>
               {!isFullscreen ? (
                 <div className="flex flex-col items-center justify-center py-20 text-center">
                   <Maximize size={64} className="mb-6" />
@@ -1619,11 +1630,10 @@ export default function App() {
                         )}
 
                         {testQuestions[currentQuestionIndex].type === 'pdf-assessment' && testQuestions[currentQuestionIndex].pdf_url && (
-                          <div className="w-full h-[600px] border-4 border-black rounded-2xl overflow-hidden relative bg-zinc-100 mb-6">
-                            <div className="absolute top-0 left-0 right-0 h-16 z-10 bg-transparent pointer-events-auto" title="Interaction with PDF toolbar is disabled" />
+                          <div className="w-full h-[600px] border-4 border-black rounded-2xl overflow-y-auto relative bg-zinc-100 mb-6 no-select custom-scrollbar">
                             <iframe 
-                              src={`${testQuestions[currentQuestionIndex].pdf_url}#toolbar=0&navpanes=0&scrollbar=1&statusbar=0&messages=0&view=FitH`}
-                              className="w-full h-full border-none"
+                              src={`${testQuestions[currentQuestionIndex].pdf_url}#toolbar=0&navpanes=0&scrollbar=0&statusbar=0&messages=0&view=FitH`}
+                              className="w-full h-[3000px] border-none pointer-events-none"
                               title="Assessment PDF"
                               sandbox="allow-scripts allow-same-origin allow-forms"
                               allow="autoplay; fullscreen"
@@ -1993,20 +2003,13 @@ export default function App() {
                                   {key ? `✓ API Key Detected: ${key.substring(0, 6)}...${key.substring(key.length - 4)}` : "✗ NO API KEY FOUND!"}
                                 </div>
                                 <div className="border-t border-zinc-200 pt-2 mt-2 space-y-1 opacity-70">
-                                  <div>• Source (window.ENV): {winEnv?.VITE_GEMINI_API_KEY ? "Found" : "Not Found"}</div>
-                                  <div>• Source (import.meta.env): {viteEnv?.VITE_GEMINI_API_KEY || viteEnv?.GEMINI_API_Key ? "Found" : "Not Found"}</div>
-                                  <div>• Source (process.env): {typeof process !== 'undefined' && process.env?.GEMINI_API_KEY ? "Found" : "Not Found"}</div>
+                                  <div>• Source (window.ENV): {winEnv?.VITE_GEMINI_API_KEY || winEnv?.VITE_GEMINI_APIKEY ? "Found" : "Not Found"}</div>
+                                  <div>• Source (import.meta.env): {viteEnv?.VITE_GEMINI_API_KEY || viteEnv?.VITE_GEMINI_APIKEY || viteEnv?.GEMINI_API_Key ? "Found" : "Not Found"}</div>
+                                  <div>• Source (process.env): {typeof process !== 'undefined' && (process.env?.GEMINI_API_KEY || process.env?.GEMINI_APIKEY) ? "Found" : "Not Found"}</div>
                                 </div>
                               </>
                             );
                           })()}
-                        </div>
-                        <div className="text-xs text-zinc-500 space-y-2">
-                          <p><strong>Step 1:</strong> Go to your Render Dashboard.</p>
-                          <p><strong>Step 2:</strong> Navigate to Environment settings.</p>
-                          <p><strong>Step 3:</strong> Add a variable named <code className="bg-zinc-200 px-1 rounded">VITE_GEMINI_API_KEY</code>.</p>
-                          <p><strong>Step 4:</strong> Paste your Gemini API key and save.</p>
-                          <p><strong>Step 5:</strong> Redeploy your application (Manual Deploy &rarr; Clear Cache &amp; Deploy).</p>
                         </div>
 
                         <div className="border-t border-zinc-200 pt-4 mt-4">
@@ -2069,33 +2072,6 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                  </div>
-
-                  <div className="bg-zinc-100 p-8 rounded-3xl border-2 border-dashed border-zinc-300">
-                    <h4 className="font-bold uppercase mb-4 italic">Common Fixes for Dummies</h4>
-                    <ul className="space-y-4 text-sm">
-                      <li className="flex gap-4">
-                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">1</div>
-                        <div>
-                          <p className="font-bold">Enable the API in Google Cloud</p>
-                          <p className="text-zinc-600">Your key must have the "Generative Language API" enabled. Go to Google Cloud Console, find your project, and enable it in the API Library.</p>
-                        </div>
-                      </li>
-                      <li className="flex gap-4">
-                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">2</div>
-                        <div>
-                          <p className="font-bold">Check API Key Restrictions</p>
-                          <p className="text-zinc-600">If you set "API Restrictions" on your key, make sure it allows "Generative Language API". If you set "Website Restrictions", make sure your Render URL is allowed.</p>
-                        </div>
-                      </li>
-                      <li className="flex gap-4">
-                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">3</div>
-                        <div>
-                          <p className="font-bold">Camera Permissions</p>
-                          <p className="text-zinc-600">Ensure your browser is not blocking the camera. Look for the camera icon in the URL bar and select "Allow".</p>
-                        </div>
-                      </li>
-                    </ul>
                   </div>
                 </div>
               )}
