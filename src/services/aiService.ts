@@ -2,7 +2,11 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 const getApiKey = () => {
   const env = (import.meta as any).env;
-  return process.env.GEMINI_API_KEY || (env && env.VITE_GEMINI_API_KEY) || "";
+  // Try multiple sources for the key
+  return process.env.GEMINI_API_KEY || 
+         (env && env.VITE_GEMINI_API_KEY) || 
+         (env && env.GEMINI_API_KEY) ||
+         "";
 };
 
 export async function analyzeProctoring(imageBuffer: string) {
