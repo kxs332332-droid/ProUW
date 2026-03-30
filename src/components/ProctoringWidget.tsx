@@ -21,11 +21,16 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
   const [debugKey, setDebugKey] = useState<string>("");
 
   useEffect(() => {
-    const apiKey = process.env.GEMINI_API_KEY || "";
+    const env = (import.meta as any).env;
+    const apiKey = process.env.GEMINI_API_KEY || 
+                   (env && env.VITE_GEMINI_API_KEY) || 
+                   (env && env.GEMINI_API_KEY) ||
+                   "";
     if (apiKey) {
       setDebugKey(`${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}`);
-      // Hide debug info after 10 seconds
-      setTimeout(() => setDebugKey(""), 10000);
+      // Keep debug info visible for longer (30s) or permanently if requested? 
+      // User said "Still not showing", let's make it stay for 60s.
+      setTimeout(() => setDebugKey(""), 60000);
     }
     
     let activeStream: MediaStream | null = null;
@@ -162,7 +167,7 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
     <motion.div
       drag
       dragMomentum={false}
-      className={`fixed top-20 right-4 w-48 h-40 bg-black border-2 ${status === 'warning' ? 'border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.4)]' : 'border-white/20'} rounded-xl overflow-hidden shadow-2xl z-[10000] cursor-move transition-colors duration-500`}
+      className="fixed top-20 right-4 w-48 h-40 bg-black border-2 border-white/20 rounded-xl overflow-hidden shadow-2xl z-[10000] cursor-move"
       initial={{ opacity: 0, scale: 0.8, x: 0, y: 0 }}
       animate={{ opacity: 1, scale: 1 }}
     >
@@ -176,26 +181,13 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
       )}
 
       <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full text-[9px] text-white font-bold border border-white/10">
-        <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-blue-500 animate-pulse" : (status === 'warning' ? "bg-red-500" : "bg-green-500")}`} />
+        <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-blue-500 animate-pulse" : "bg-green-500"}`} />
         <span className="tracking-widest uppercase">AI Proctoring</span>
       </div>
 
       <div className="bg-zinc-900 p-2 flex flex-col justify-center h-8 border-t border-white/10">
-        <div className="flex items-center justify-between text-[8px] text-zinc-400 font-mono uppercase tracking-tighter">
-          <div className="flex items-center gap-1">
-            {status === 'warning' ? (
-              <>
-                <AlertTriangle size={8} className="text-red-500" />
-                <span className="text-red-500">Warning</span>
-              </>
-            ) : (
-              <>
-                <ShieldCheck size={8} className="text-emerald-500" />
-                <span>Secure</span>
-              </>
-            )}
-          </div>
-          <span>{lastCheckTime ? lastCheckTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Initializing...'}</span>
+        <div className="flex items-center justify-end text-[8px] text-zinc-400 font-mono uppercase tracking-tighter">
+          <span>{lastCheckTime ? lastCheckTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}</span>
         </div>
       </div>
       

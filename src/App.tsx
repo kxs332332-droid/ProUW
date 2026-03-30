@@ -63,7 +63,15 @@ import {
   writeBatch
 } from 'firebase/firestore';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const getApiKey = () => {
+  const env = (import.meta as any).env;
+  return process.env.GEMINI_API_KEY || 
+         (env && env.VITE_GEMINI_API_KEY) || 
+         (env && env.GEMINI_API_KEY) ||
+         "";
+};
+
+const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
 // --- Components ---
 
@@ -182,15 +190,16 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const logActivity = useCallback(async (action: string, details: string) => {
-    if (!currentUser) {
-      console.warn(`logActivity skipped: No currentUser for action ${action}`);
+  const logActivity = useCallback(async (action: string, details: string, userId?: string) => {
+    const uid = userId || currentUser?.id;
+    if (!uid) {
+      console.warn(`logActivity skipped: No userId for action ${action}`);
       return;
     }
     try {
       console.log(`Logging activity: ${action}`, details);
       await addDoc(collection(db, 'activity_logs'), {
-        user_id: currentUser.id,
+        user_id: uid,
         action,
         details,
         timestamp: serverTimestamp()
@@ -574,7 +583,7 @@ export default function App() {
               setView('home');
             }
           }
-          logActivity('LOGIN', 'User logged in');
+          logActivity('LOGIN', 'User logged in', firebaseUser.uid);
         } else {
           showAlert("Login Failed", "User profile not found.");
         }
@@ -593,6 +602,8 @@ export default function App() {
           await setDoc(doc(db, 'users', firebaseUser.uid), adminData);
           setCurrentUser({ ...adminData, id: firebaseUser.uid } as User);
           setIsAdmin(true);
+          logActivity('SIGNUP', 'System admin created', firebaseUser.uid);
+          logActivity('LOGIN', 'System admin logged in', firebaseUser.uid);
           setView('admin');
           showAlert("System Initialized", "Admin account created and logged in.");
           return;
@@ -636,6 +647,7 @@ export default function App() {
       };
 
       await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+      logActivity('SIGNUP', 'New profile created', firebaseUser.uid);
       
       showAlert("Success", "Profile created successfully!");
       setView('login');
@@ -1533,10 +1545,6 @@ export default function App() {
                             <AlertTriangle size={16} />
                             VIOLATIONS: {violationCount}/5
                           </div>
-                          <div className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold ${proctoringWarnings === 0 ? 'bg-zinc-100 text-zinc-600 border-zinc-200' : 'bg-red-100 text-red-700 border-red-200'}`}>
-                            <Eye size={16} />
-                            AI ALERTS: {proctoringWarnings}
-                          </div>
                           <div className={`px-6 py-2 rounded-full border-2 border-black font-mono text-xl ${timeLeft < 10 ? 'bg-red-600 text-white animate-pulse' : ''}`}>
                             {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
                           </div>
@@ -1897,24 +1905,49 @@ export default function App() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    {adminLogs.map(log => (
-                      <div key={log.id} className={`text-sm p-3 border-l-4 ${log.action === 'AI_PROCTORING_ALERT' ? 'border-red-600 bg-red-50' : 'border-black bg-zinc-50'} flex justify-between transition-all hover:bg-zinc-100`}>
-                        <div>
-                          <span className={`font-bold uppercase text-[10px] ${log.action === 'AI_PROCTORING_ALERT' ? 'bg-red-600' : 'bg-black'} text-white px-1.5 py-0.5 mr-2`}>
-                            {log.action}
+                    {(() => {
+                      const groupedLogs: any[] = [];
+                      adminLogs.forEach(log => {
+                        const lastGroup = groupedLogs[groupedLogs.length - 1];
+                        // Group consecutive identical AI alerts for the same user
+                        if (lastGroup && 
+                            lastGroup.user_id === log.user_id && 
+                            lastGroup.action === log.action && 
+                            lastGroup.details === log.details && 
+                            log.action === 'AI_PROCTORING_ALERT') {
+                          lastGroup.count = (lastGroup.count || 1) + 1;
+                          // Keep the earliest timestamp for the first occurrence? 
+                          // Or latest? User said "show (7) in brackets next to AI alert", 
+                          // usually we show the latest timestamp for the group.
+                          lastGroup.timestamp = log.timestamp; 
+                        } else {
+                          groupedLogs.push({ ...log, count: 1 });
+                        }
+                      });
+                      return groupedLogs.map(log => (
+                        <div key={log.id} className={`text-sm p-3 border-l-4 ${log.action === 'AI_PROCTORING_ALERT' ? 'border-red-600 bg-red-50' : 'border-black bg-zinc-50'} flex justify-between transition-all hover:bg-zinc-100`}>
+                          <div>
+                            <span className={`font-bold uppercase text-[10px] ${log.action === 'AI_PROCTORING_ALERT' ? 'bg-red-600' : 'bg-black'} text-white px-1.5 py-0.5 mr-2`}>
+                              {log.action}
+                            </span>
+                            <span className="font-medium">
+                              {log.first_name ? `${log.first_name} ${log.last_name}` : 'Unknown User'}
+                            </span>
+                            <span className="text-zinc-500 ml-2">
+                              — {log.details}
+                              {log.count > 1 && (
+                                <span className="ml-2 font-bold text-red-600">({log.count})</span>
+                              )}
+                            </span>
+                          </div>
+                          <span className="text-zinc-400 font-mono text-xs">
+                            {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleString() : 
+                             log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString() : 
+                             'Just now'}
                           </span>
-                          <span className="font-medium">
-                            {log.first_name ? `${log.first_name} ${log.last_name}` : 'Unknown User'}
-                          </span>
-                          <span className="text-zinc-500 ml-2">— {log.details}</span>
                         </div>
-                        <span className="text-zinc-400 font-mono text-xs">
-                          {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleString() : 
-                           log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString() : 
-                           'Just now'}
-                        </span>
-                      </div>
-                    ))}
+                      ));
+                    })()}
                   </div>
                 </div>
               )}
