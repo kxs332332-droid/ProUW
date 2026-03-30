@@ -1981,23 +1981,67 @@ export default function App() {
                         <Shield size={18} /> API Key Status
                       </h4>
                       <div className="space-y-4">
-                        <div className="p-4 bg-zinc-100 rounded-lg font-mono text-sm break-all">
-                          {getApiKey() ? (
-                            <div className="text-green-600 font-bold">
-                              ✓ API Key Detected: {getApiKey().substring(0, 6)}...{getApiKey().substring(getApiKey().length - 4)}
-                            </div>
-                          ) : (
-                            <div className="text-red-600 font-bold animate-pulse">
-                              ✗ NO API KEY FOUND!
-                            </div>
-                          )}
+                        <div className="p-4 bg-zinc-100 rounded-lg font-mono text-xs space-y-2">
+                          {(() => {
+                            const key = getApiKey();
+                            const winEnv = (window as any).ENV;
+                            const viteEnv = (import.meta as any).env;
+                            
+                            return (
+                              <>
+                                <div className={key ? "text-green-600 font-bold" : "text-red-600 font-bold animate-pulse"}>
+                                  {key ? `✓ API Key Detected: ${key.substring(0, 6)}...${key.substring(key.length - 4)}` : "✗ NO API KEY FOUND!"}
+                                </div>
+                                <div className="border-t border-zinc-200 pt-2 mt-2 space-y-1 opacity-70">
+                                  <div>• Source (window.ENV): {winEnv?.VITE_GEMINI_API_KEY ? "Found" : "Not Found"}</div>
+                                  <div>• Source (import.meta.env): {viteEnv?.VITE_GEMINI_API_KEY || viteEnv?.GEMINI_API_Key ? "Found" : "Not Found"}</div>
+                                  <div>• Source (process.env): {typeof process !== 'undefined' && process.env?.GEMINI_API_KEY ? "Found" : "Not Found"}</div>
+                                </div>
+                              </>
+                            );
+                          })()}
                         </div>
                         <div className="text-xs text-zinc-500 space-y-2">
                           <p><strong>Step 1:</strong> Go to your Render Dashboard.</p>
                           <p><strong>Step 2:</strong> Navigate to Environment settings.</p>
                           <p><strong>Step 3:</strong> Add a variable named <code className="bg-zinc-200 px-1 rounded">VITE_GEMINI_API_KEY</code>.</p>
                           <p><strong>Step 4:</strong> Paste your Gemini API key and save.</p>
-                          <p><strong>Step 5:</strong> Redeploy your application.</p>
+                          <p><strong>Step 5:</strong> Redeploy your application (Manual Deploy &rarr; Clear Cache &amp; Deploy).</p>
+                        </div>
+
+                        <div className="border-t border-zinc-200 pt-4 mt-4">
+                          <h5 className="text-[10px] font-black uppercase mb-2 text-zinc-400">Emergency Manual Override</h5>
+                          <div className="flex gap-2">
+                            <input 
+                              type="password" 
+                              placeholder="Paste API Key here..." 
+                              className="flex-1 text-[10px] p-2 border border-zinc-300 rounded"
+                              id="manual-key-input"
+                            />
+                            <Button 
+                              onClick={() => {
+                                const input = document.getElementById('manual-key-input') as HTMLInputElement;
+                                if (input.value) {
+                                  localStorage.setItem('MANUAL_GEMINI_API_KEY', input.value);
+                                  window.location.reload();
+                                }
+                              }}
+                              className="text-[10px] px-3 py-1"
+                            >
+                              Save
+                            </Button>
+                            <Button 
+                              variant="secondary"
+                              onClick={() => {
+                                localStorage.removeItem('MANUAL_GEMINI_API_KEY');
+                                window.location.reload();
+                              }}
+                              className="text-[10px] px-3 py-1"
+                            >
+                              Clear
+                            </Button>
+                          </div>
+                          <p className="text-[8px] text-zinc-400 mt-1 italic">Note: This only applies to your current browser session.</p>
                         </div>
                       </div>
                     </div>

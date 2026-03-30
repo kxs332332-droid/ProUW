@@ -2,14 +2,36 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 export const getApiKey = () => {
   try {
-    // Vite standard
+    // Check for manual override (Local Storage)
+    if (typeof localStorage !== 'undefined') {
+      const manualKey = localStorage.getItem('MANUAL_GEMINI_API_KEY');
+      if (manualKey) return manualKey;
+    }
+
+    // Check for injected environment variables (Full-Stack mode)
+    const winEnv = (window as any).ENV;
+    if (winEnv && winEnv.VITE_GEMINI_API_KEY) return winEnv.VITE_GEMINI_API_KEY;
+
+    // Vite standard and common variations
     const env = (import.meta as any).env;
-    if (env?.VITE_GEMINI_API_KEY) return env.VITE_GEMINI_API_KEY;
-    if (env?.GEMINI_API_KEY) return env.GEMINI_API_KEY;
+    const keys = [
+      'VITE_GEMINI_API_KEY',
+      'GEMINI_API_KEY',
+      'Vite_Gemini_API_Key',
+      'Gemini_API_Key',
+      'VITE_Gemini_API_Key'
+    ];
+
+    for (const key of keys) {
+      if (env && env[key]) return env[key];
+    }
     
     // Last resort (Node-style, might be shimmed)
-    if (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
-    if (typeof process !== 'undefined' && process.env?.VITE_GEMINI_API_KEY) return process.env.VITE_GEMINI_API_KEY;
+    if (typeof process !== 'undefined' && process.env) {
+      for (const key of keys) {
+        if (process.env[key]) return process.env[key];
+      }
+    }
   } catch (e) {
     console.warn("Error accessing environment variables:", e);
   }
