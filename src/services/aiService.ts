@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 const getApiKey = () => {
   const env = (import.meta as any).env;
@@ -46,6 +46,8 @@ export async function analyzeProctoring(imageBuffer: string) {
       config: {
         systemInstruction: "You are a highly vigilant exam proctor. Your goal is to detect any sign of cheating or malpractice from a webcam feed. Be extremely precise. Flag black screens, missing candidates, multiple people, and unauthorized devices immediately. If the frame is dark or obscured, it is a violation.",
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        maxOutputTokens: 1024,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -73,10 +75,11 @@ export async function analyzeProctoring(imageBuffer: string) {
     console.error("AI Proctoring Critical Error:", error);
 
     let friendlyReason = "Proctoring Service Error";
-    if (error?.message?.includes("API_KEY_SERVICE_BLOCKED")) {
-      friendlyReason = "AI Service Blocked: Please enable 'Generative Language API' for your API Key in Google Cloud Console or use a dedicated Gemini API Key.";
+    if (error?.message?.includes("API_KEY_SERVICE_BLOCKED") || error?.message?.includes("PERMISSION_DENIED")) {
+      console.error("FIX REQUIRED: Enable the Generative Language API here: https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com");
+      friendlyReason = "AI Service Blocked: 1. Ensure 'Generative Language API' is ENABLED in Google Cloud Console. 2. Ensure 'API Restrictions' are set to 'None' for this key. 3. Ensure you are looking at the CORRECT PROJECT in Google Cloud (check the Project ID in AI Studio).";
     } else if (error?.message?.includes("API key not valid")) {
-      friendlyReason = "Invalid API Key: Please check your GEMINI_API_KEY on Render.";
+      friendlyReason = "Invalid API Key: Please check your GEMINI_API_KEY on Render/Replit.";
     } else {
       friendlyReason = `Proctoring Service Error: ${error.message || "Unknown error"}`;
     }
@@ -114,6 +117,8 @@ export async function scoreExplanation(userExplanation: string, masterRationale:
       ],
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        maxOutputTokens: 1024,
         responseSchema: {
           type: Type.OBJECT,
           properties: {

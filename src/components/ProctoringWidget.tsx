@@ -18,8 +18,16 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
   const [status, setStatus] = useState<'secure' | 'warning'>('secure');
+  const [debugKey, setDebugKey] = useState<string>("");
 
   useEffect(() => {
+    const apiKey = process.env.GEMINI_API_KEY || "";
+    if (apiKey) {
+      setDebugKey(`${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}`);
+      // Hide debug info after 10 seconds
+      setTimeout(() => setDebugKey(""), 10000);
+    }
+    
     let activeStream: MediaStream | null = null;
     const timeout = setTimeout(() => {
       if (!activeStream) {
@@ -97,8 +105,11 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
 
         if (context && video.videoWidth > 0) {
           try {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            // Resize to a smaller resolution for AI analysis to save bandwidth and tokens
+            const targetWidth = 320;
+            const scale = Math.min(1, targetWidth / video.videoWidth);
+            canvas.width = video.videoWidth * scale;
+            canvas.height = video.videoHeight * scale;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             
             // Client-side black screen detection as a fallback for robustness
@@ -157,6 +168,13 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
     >
       <video ref={videoRef} autoPlay muted playsInline className="w-full h-32 object-cover" />
       
+      {/* Debug Key Overlay */}
+      {debugKey && (
+        <div className="absolute top-10 left-2 bg-black/80 text-white text-[8px] px-1.5 py-0.5 rounded font-mono z-50 border border-white/20">
+          Key: {debugKey}
+        </div>
+      )}
+
       <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full text-[9px] text-white font-bold border border-white/10">
         <div className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? "bg-blue-500 animate-pulse" : (status === 'warning' ? "bg-red-500" : "bg-green-500")}`} />
         <span className="tracking-widest uppercase">AI Proctoring</span>
