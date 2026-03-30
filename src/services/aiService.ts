@@ -1,12 +1,19 @@
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
-const getApiKey = () => {
-  const env = (import.meta as any).env;
-  // Try multiple sources for the key
-  return process.env.GEMINI_API_KEY || 
-         (env && env.VITE_GEMINI_API_KEY) || 
-         (env && env.GEMINI_API_KEY) ||
-         "";
+export const getApiKey = () => {
+  try {
+    // Vite standard
+    const env = (import.meta as any).env;
+    if (env?.VITE_GEMINI_API_KEY) return env.VITE_GEMINI_API_KEY;
+    if (env?.GEMINI_API_KEY) return env.GEMINI_API_KEY;
+    
+    // Last resort (Node-style, might be shimmed)
+    if (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+    if (typeof process !== 'undefined' && process.env?.VITE_GEMINI_API_KEY) return process.env.VITE_GEMINI_API_KEY;
+  } catch (e) {
+    console.warn("Error accessing environment variables:", e);
+  }
+  return "";
 };
 
 export async function analyzeProctoring(imageBuffer: string) {

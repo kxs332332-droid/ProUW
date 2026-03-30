@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Camera, AlertTriangle, ShieldCheck } from 'lucide-react';
-import { analyzeProctoring } from '../services/aiService';
+import { analyzeProctoring, getApiKey } from '../services/aiService';
 
 interface ProctoringWidgetProps {
   userId: string;
@@ -19,18 +19,19 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
   const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
   const [status, setStatus] = useState<'secure' | 'warning'>('secure');
   const [debugKey, setDebugKey] = useState<string>("");
+  const [isKeyMissing, setIsKeyMissing] = useState(false);
 
   useEffect(() => {
-    const env = (import.meta as any).env;
-    const apiKey = process.env.GEMINI_API_KEY || 
-                   (env && env.VITE_GEMINI_API_KEY) || 
-                   (env && env.GEMINI_API_KEY) ||
-                   "";
+    const apiKey = getApiKey();
     if (apiKey) {
       setDebugKey(`${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}`);
-      // Keep debug info visible for longer (30s) or permanently if requested? 
-      // User said "Still not showing", let's make it stay for 60s.
+      setIsKeyMissing(false);
+      // Keep debug info visible for 60s
       setTimeout(() => setDebugKey(""), 60000);
+    } else {
+      console.error("ProctoringWidget: No API Key found in environment!");
+      setDebugKey("MISSING_KEY");
+      setIsKeyMissing(true);
     }
     
     let activeStream: MediaStream | null = null;
@@ -175,7 +176,7 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
       
       {/* Debug Key Overlay */}
       {debugKey && (
-        <div className="absolute top-10 left-2 bg-black/80 text-white text-[8px] px-1.5 py-0.5 rounded font-mono z-50 border border-white/20">
+        <div className={`absolute top-10 left-2 ${isKeyMissing ? 'bg-red-600 animate-pulse' : 'bg-black/80'} text-white text-[8px] px-1.5 py-0.5 rounded font-mono z-50 border border-white/20`}>
           Key: {debugKey}
         </div>
       )}

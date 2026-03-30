@@ -33,7 +33,7 @@ import { QuestionCanvas } from './components/QuestionCanvas';
 import { ProctoringWidget } from './components/ProctoringWidget';
 import { Calculator } from './components/Calculator';
 import { ResourceViewer } from './components/ResourceViewer';
-import { scoreExplanation } from './services/aiService';
+import { scoreExplanation, getApiKey } from './services/aiService';
 import questionsData from './questions.json';
 import { auth, db, storage } from './firebase';
 import { handleFirestoreError, OperationType } from './utils/firestore';
@@ -63,15 +63,29 @@ import {
   writeBatch
 } from 'firebase/firestore';
 
-const getApiKey = () => {
-  const env = (import.meta as any).env;
-  return process.env.GEMINI_API_KEY || 
-         (env && env.VITE_GEMINI_API_KEY) || 
-         (env && env.GEMINI_API_KEY) ||
-         "";
-};
-
 const ai = new GoogleGenAI({ apiKey: getApiKey() });
+
+// --- Console Log Capture for Debugging ---
+const capturedLogs: any[] = [];
+const originalLog = console.log;
+const originalWarn = console.warn;
+const originalError = console.error;
+
+console.log = (...args) => {
+  capturedLogs.push({ type: 'log', message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), time: new Date().toLocaleTimeString() });
+  if (capturedLogs.length > 100) capturedLogs.shift();
+  originalLog.apply(console, args);
+};
+console.warn = (...args) => {
+  capturedLogs.push({ type: 'warn', message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), time: new Date().toLocaleTimeString() });
+  if (capturedLogs.length > 100) capturedLogs.shift();
+  originalWarn.apply(console, args);
+};
+console.error = (...args) => {
+  capturedLogs.push({ type: 'error', message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), time: new Date().toLocaleTimeString() });
+  if (capturedLogs.length > 100) capturedLogs.shift();
+  originalError.apply(console, args);
+};
 
 // --- Components ---
 
@@ -287,9 +301,10 @@ export default function App() {
   const [regData, setRegData] = useState({ firstName: '', lastName: '', employeeId: '', userId: '', password: '' });
 
   // Admin States
-  const [adminTab, setAdminTab] = useState<'questions' | 'results' | 'logs' | 'repository' | 'database' | 'users' | 'resources'>('questions');
+  const [adminTab, setAdminTab] = useState<'questions' | 'results' | 'logs' | 'repository' | 'database' | 'users' | 'resources' | 'troubleshoot'>('questions');
   const [repositoryData, setRepositoryData] = useState<{ logs: any[], sessions: any[] }>({ logs: [], sessions: [] });
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
 
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -1805,6 +1820,7 @@ export default function App() {
                   <Button variant={adminTab === 'repository' ? 'primary' : 'ghost'} onClick={() => setAdminTab('repository')}>30-Day Repository</Button>
                   <Button variant={adminTab === 'users' ? 'primary' : 'ghost'} onClick={() => setAdminTab('users')}>Users</Button>
                   <Button variant={adminTab === 'database' ? 'primary' : 'ghost'} onClick={() => setAdminTab('database')}>Database</Button>
+                  <Button variant={adminTab === 'troubleshoot' ? 'primary' : 'ghost'} onClick={() => setAdminTab('troubleshoot')}>Troubleshoot</Button>
                 </div>
               </div>
 
@@ -1952,13 +1968,100 @@ export default function App() {
                 </div>
               )}
 
-              {adminTab === 'repository' && (
+              {adminTab === 'troubleshoot' && (
                 <div className="space-y-10">
-                  <div className="bg-zinc-900 text-white p-8 rounded-3xl">
-                    <h3 className="text-2xl font-black mb-2 uppercase italic tracking-tighter">30-Day Data Repository</h3>
-                    <p className="text-zinc-400">This view maintains a snapshot of all activity and test sessions from the last 30 days for compliance and audit purposes.</p>
+                  <div className="bg-red-600 text-white p-8 rounded-3xl">
+                    <h3 className="text-2xl font-black mb-2 uppercase italic tracking-tighter">System Troubleshooter</h3>
+                    <p className="text-red-100">Use this tool to diagnose AI proctoring issues on Render or other environments.</p>
                   </div>
 
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 border-2 border-black rounded-2xl shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+                      <h4 className="font-bold uppercase mb-4 flex items-center gap-2">
+                        <Shield size={18} /> API Key Status
+                      </h4>
+                      <div className="space-y-4">
+                        <div className="p-4 bg-zinc-100 rounded-lg font-mono text-sm break-all">
+                          {getApiKey() ? (
+                            <div className="text-green-600 font-bold">
+                              ✓ API Key Detected: {getApiKey().substring(0, 6)}...{getApiKey().substring(getApiKey().length - 4)}
+                            </div>
+                          ) : (
+                            <div className="text-red-600 font-bold animate-pulse">
+                              ✗ NO API KEY FOUND!
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-500 space-y-2">
+                          <p><strong>Step 1:</strong> Go to your Render Dashboard.</p>
+                          <p><strong>Step 2:</strong> Navigate to Environment settings.</p>
+                          <p><strong>Step 3:</strong> Add a variable named <code className="bg-zinc-200 px-1 rounded">VITE_GEMINI_API_KEY</code>.</p>
+                          <p><strong>Step 4:</strong> Paste your Gemini API key and save.</p>
+                          <p><strong>Step 5:</strong> Redeploy your application.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-white p-6 border-2 border-black rounded-2xl shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+                      <h4 className="font-bold uppercase mb-4 flex items-center gap-2">
+                        <AlertCircle size={18} /> Debug Console
+                      </h4>
+                      <p className="text-sm text-zinc-600 mb-4">Since F12 might be blocked, you can view the internal system logs here.</p>
+                      <Button onClick={() => setShowLogs(!showLogs)} className="w-full">
+                        {showLogs ? 'Hide System Logs' : 'Show System Logs'}
+                      </Button>
+                      
+                      {showLogs && (
+                        <div className="mt-4 p-4 bg-zinc-900 text-zinc-300 rounded-lg font-mono text-[10px] h-64 overflow-y-auto space-y-1">
+                          {capturedLogs.length === 0 ? (
+                            <p className="text-zinc-500 italic">No logs captured yet...</p>
+                          ) : (
+                            capturedLogs.map((log, i) => (
+                              <div key={i} className={`${log.type === 'error' ? 'text-red-400' : log.type === 'warn' ? 'text-amber-400' : 'text-zinc-400'}`}>
+                                <span className="opacity-50">[{log.time}]</span> {log.message}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="bg-zinc-100 p-8 rounded-3xl border-2 border-dashed border-zinc-300">
+                    <h4 className="font-bold uppercase mb-4 italic">Common Fixes for Dummies</h4>
+                    <ul className="space-y-4 text-sm">
+                      <li className="flex gap-4">
+                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">1</div>
+                        <div>
+                          <p className="font-bold">Enable the API in Google Cloud</p>
+                          <p className="text-zinc-600">Your key must have the "Generative Language API" enabled. Go to Google Cloud Console, find your project, and enable it in the API Library.</p>
+                        </div>
+                      </li>
+                      <li className="flex gap-4">
+                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">2</div>
+                        <div>
+                          <p className="font-bold">Check API Key Restrictions</p>
+                          <p className="text-zinc-600">If you set "API Restrictions" on your key, make sure it allows "Generative Language API". If you set "Website Restrictions", make sure your Render URL is allowed.</p>
+                        </div>
+                      </li>
+                      <li className="flex gap-4">
+                        <div className="bg-black text-white w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 font-bold">3</div>
+                        <div>
+                          <p className="font-bold">Camera Permissions</p>
+                          <p className="text-zinc-600">Ensure your browser is not blocking the camera. Look for the camera icon in the URL bar and select "Allow".</p>
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+
+              {adminTab === 'repository' && (
+                <div className="space-y-6">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xl font-bold">30-Day Audit Repository</h3>
+                    <Button variant="secondary" onClick={() => exportToExcel([...repositoryData.logs, ...repositoryData.sessions], 'Repository_Audit')}><Download size={20} /> Export Full Audit</Button>
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div className="space-y-4">
                       <h4 className="text-sm font-black uppercase border-b-2 border-black pb-2">Recent Activity Logs</h4>
