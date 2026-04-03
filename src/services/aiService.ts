@@ -1,11 +1,14 @@
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
-export const getApiKey = () => {
+export const getApiKey = (type: 'proctoring' | 'scoring' = 'proctoring') => {
   try {
     // Check for manual override (Local Storage)
     if (typeof localStorage !== 'undefined') {
-      const manualKey = localStorage.getItem('MANUAL_GEMINI_API_KEY');
-      if (manualKey) return manualKey;
+      const scoringKey = localStorage.getItem('MANUAL_SCORING_API_KEY');
+      const proctoringKey = localStorage.getItem('MANUAL_GEMINI_API_KEY');
+      
+      if (type === 'scoring' && scoringKey) return scoringKey;
+      if (proctoringKey) return proctoringKey;
     }
 
     // Check for injected environment variables (Full-Stack mode)
@@ -124,7 +127,7 @@ export async function analyzeProctoring(imageBuffer: string) {
 }
 
 export async function scoreExplanation(userExplanation: string, masterRationale: string) {
-  const apiKey = getApiKey();
+  const apiKey = getApiKey('scoring');
   if (!apiKey) {
     console.error("AI Scoring: GEMINI_API_KEY is missing!");
     return { score: 0, feedback: "AI Scoring Service Unavailable (Missing API Key)" };
@@ -141,11 +144,18 @@ export async function scoreExplanation(userExplanation: string, masterRationale:
         {
           parts: [
             {
-              text: `Compare the user's explanation with the master rationale for a mortgage underwriting question. 
-              Master Rationale: ${masterRationale}
-              User Explanation: ${userExplanation}
+              text: `Evaluate the user's explanation against the master rationale for a technical mortgage underwriting question.
               
-              Provide a similarity score from 0 to 100 based on how well the user captures the core concepts and technical accuracy.`
+              Master Rationale (The correct answer/meaning): ${masterRationale}
+              User's Explanation: ${userExplanation}
+              
+              SCORING CRITERIA:
+              1. INTENT & MEANING: Focus strictly on the core intent and conceptual understanding. If the user's explanation matches the meaning of the master rationale, give a high score.
+              2. NO WORD-FOR-WORD MATCH: Do NOT penalize for not using the exact same words.
+              3. IGNORE SURFACE ERRORS: If the underlying answer is correct, completely ignore grammar, phrasing, spelling, or punctuation errors.
+              4. TECHNICAL ACCURACY: Ensure the key technical points are captured, even if expressed in simple terms.
+              
+              Provide a similarity score from 0 to 100 and brief feedback.`
             }
           ]
         }

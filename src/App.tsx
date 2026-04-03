@@ -27,7 +27,6 @@ import {
   Calculator as CalcIcon
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { GoogleGenAI } from "@google/genai";
 import { User, Question, TestSession, Response, ActivityLog, Resource } from './types';
 import { QuestionCanvas } from './components/QuestionCanvas';
 import { ProctoringWidget } from './components/ProctoringWidget';
@@ -62,8 +61,6 @@ import {
   serverTimestamp,
   writeBatch
 } from 'firebase/firestore';
-
-const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
 // --- Console Log Capture for Debugging ---
 const capturedLogs: any[] = [];
@@ -1993,14 +1990,18 @@ export default function App() {
                       <div className="space-y-4">
                         <div className="p-4 bg-zinc-100 rounded-lg font-mono text-xs space-y-2">
                           {(() => {
-                            const key = getApiKey();
+                            const proctorKey = getApiKey('proctoring');
+                            const scoringKey = getApiKey('scoring');
                             const winEnv = (window as any).ENV;
                             const viteEnv = (import.meta as any).env;
                             
                             return (
                               <>
-                                <div className={key ? "text-green-600 font-bold" : "text-red-600 font-bold animate-pulse"}>
-                                  {key ? `✓ API Key Detected: ${key.substring(0, 6)}...${key.substring(key.length - 4)}` : "✗ NO API KEY FOUND!"}
+                                <div className={proctorKey ? "text-green-600 font-bold" : "text-red-600 font-bold animate-pulse"}>
+                                  {proctorKey ? `✓ Proctoring Key: ${proctorKey.substring(0, 6)}...${proctorKey.substring(proctorKey.length - 4)}` : "✗ NO PROCTORING KEY!"}
+                                </div>
+                                <div className={scoringKey ? "text-green-600 font-bold" : "text-red-600 font-bold animate-pulse"}>
+                                  {scoringKey ? `✓ Scoring Key: ${scoringKey.substring(0, 6)}...${scoringKey.substring(scoringKey.length - 4)}` : "✗ NO SCORING KEY!"}
                                 </div>
                                 <div className="border-t border-zinc-200 pt-2 mt-2 space-y-1 opacity-70">
                                   <div>• Source (window.ENV): {winEnv?.VITE_GEMINI_API_KEY || winEnv?.VITE_GEMINI_APIKEY ? "Found" : "Not Found"}</div>
@@ -2013,17 +2014,17 @@ export default function App() {
                         </div>
 
                         <div className="border-t border-zinc-200 pt-4 mt-4">
-                          <h5 className="text-[10px] font-black uppercase mb-2 text-zinc-400">Emergency Manual Override</h5>
+                          <h5 className="text-[10px] font-black uppercase mb-2 text-zinc-400">Proctoring Key Override</h5>
                           <div className="flex gap-2">
                             <input 
                               type="password" 
-                              placeholder="Paste API Key here..." 
+                              placeholder="Paste Proctoring Key..." 
                               className="flex-1 text-[10px] p-2 border border-zinc-300 rounded"
-                              id="manual-key-input"
+                              id="manual-proctor-key-input"
                             />
                             <Button 
                               onClick={() => {
-                                const input = document.getElementById('manual-key-input') as HTMLInputElement;
+                                const input = document.getElementById('manual-proctor-key-input') as HTMLInputElement;
                                 if (input.value) {
                                   localStorage.setItem('MANUAL_GEMINI_API_KEY', input.value);
                                   window.location.reload();
@@ -2044,7 +2045,41 @@ export default function App() {
                               Clear
                             </Button>
                           </div>
-                          <p className="text-[8px] text-zinc-400 mt-1 italic">Note: This only applies to your current browser session.</p>
+                        </div>
+
+                        <div className="border-t border-zinc-200 pt-4 mt-4">
+                          <h5 className="text-[10px] font-black uppercase mb-2 text-zinc-400">AI Scoring Key Override</h5>
+                          <div className="flex gap-2">
+                            <input 
+                              type="password" 
+                              placeholder="Paste Scoring Key..." 
+                              className="flex-1 text-[10px] p-2 border border-zinc-300 rounded"
+                              id="manual-scoring-key-input"
+                            />
+                            <Button 
+                              onClick={() => {
+                                const input = document.getElementById('manual-scoring-key-input') as HTMLInputElement;
+                                if (input.value) {
+                                  localStorage.setItem('MANUAL_SCORING_API_KEY', input.value);
+                                  window.location.reload();
+                                }
+                              }}
+                              className="text-[10px] px-3 py-1"
+                            >
+                              Save
+                            </Button>
+                            <Button 
+                              variant="secondary"
+                              onClick={() => {
+                                localStorage.removeItem('MANUAL_SCORING_API_KEY');
+                                window.location.reload();
+                              }}
+                              className="text-[10px] px-3 py-1"
+                            >
+                              Clear
+                            </Button>
+                          </div>
+                          <p className="text-[8px] text-zinc-400 mt-1 italic">Note: These overrides only apply to your current browser session.</p>
                         </div>
                       </div>
                     </div>

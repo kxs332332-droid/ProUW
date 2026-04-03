@@ -152,8 +152,14 @@ export const ProctoringWidget: React.FC<ProctoringWidgetProps> = ({ userId, onWa
             }
           } catch (error: any) {
             console.error("Proctoring analysis cycle error:", error);
-            setStatus('warning');
-            onWarning(`Analysis Error: ${error.message || "Unknown error"}`);
+            // Suppress 503 high demand errors as requested
+            const errorMsg = error.message || "Unknown error";
+            if (!errorMsg.includes("503") && !errorMsg.toLowerCase().includes("high demand")) {
+              setStatus('warning');
+              onWarning(`Analysis Error: ${errorMsg}`);
+            } else {
+              console.warn("Proctoring analysis cycle suppressed 503 error.");
+            }
           }
         }
         isAnalyzingRef.current = false;
